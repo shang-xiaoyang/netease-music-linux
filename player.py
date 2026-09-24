@@ -993,8 +993,9 @@ class AppWindow(Gtk.ApplicationWindow):
                 continue
             if self.store is None or len(self.store) == 0:
                 return
-            visible = {row[0] for row in self.store}
-            if not wanted.intersection(visible):
+            # 列表第一列是字符串，歌曲 id 是数字，必须同一类型才能对上。
+            visible = {str(row[0]) for row in self.store}
+            if not {str(item) for item in wanted}.intersection(visible):
                 return
             url = song.get("cover")
             if not url:
@@ -1007,7 +1008,7 @@ class AppWindow(Gtk.ApplicationWindow):
 
     def _set_row_cover(self, song_id, pix):
         for row in self.store:
-            if row[5] and row[5].get("id") == song_id:
+            if row[5] and str(row[5].get("id")) == str(song_id):
                 row[6] = pix
                 break
         return False
