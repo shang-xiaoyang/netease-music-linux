@@ -41,11 +41,21 @@ STATE_PATH = os.path.join(DATA_DIR, "state.json")
 MODE_PATH = os.path.join(DATA_DIR, "play-mode")
 COVER_DIR = os.path.join(DATA_DIR, "covers")
 RED = "#EC4141"
-ICON = os.path.join(os.path.dirname(os.path.abspath(__file__)), "icon.png")
-if not os.path.exists(ICON):
-    ICON = "/usr/share/icons/hicolor/256x256/apps/netease-music-linux.png"
-if not os.path.exists(ICON):
-    ICON = "audio-x-generic"
+def _icon_path():
+    """任务栏按图标名找小尺寸。用户主题优先，避免读到源码树里的旧图。"""
+    roots = (
+        os.path.join(GLib.get_home_dir(), ".local/share/icons/hicolor"),
+        "/usr/share/icons/hicolor",
+    )
+    for root in roots:
+        for size in (48, 32, 24, 22, 64, 128, 256):
+            path = os.path.join(root, f"{size}x{size}", "apps", "netease-music-linux.png")
+            if os.path.exists(path):
+                return path
+    return "audio-x-generic"
+
+
+ICON = _icon_path()
 
 CSS = f"""
 window {{
@@ -1337,7 +1347,7 @@ class AppWindow(Gtk.ApplicationWindow):
                     APP_ID, "netease-music-linux", AppIndicator.IndicatorCategory.APPLICATION_STATUS,
                 )
                 if os.path.exists(ICON) and not ICON.endswith("-generic"):
-                    self.indicator.set_icon_full(ICON, "网易云音乐")
+                    self.indicator.set_icon_full(os.path.abspath(ICON), "网易云音乐")
                 else:
                     self.indicator.set_icon_full("audio-x-generic", "网易云音乐")
                 self.indicator.set_status(AppIndicator.IndicatorStatus.ACTIVE)
