@@ -98,7 +98,9 @@ def search_songs(keyword, limit=30, offset=0, cookie=""):
         cookie=cookie,
     )
     result = payload.get("result") or {}
-    return [_song(item) for item in result.get("songs") or []]
+    songs = [_song(item) for item in result.get("songs") or []]
+    # 网页搜索不返回封面。专辑封面在歌曲详情里，补上后列表才能显示。
+    return attach_covers(songs, cookie)
 
 
 def top_playlist(limit=24, cookie=""):
@@ -360,6 +362,19 @@ def _artists(item):
 def _album(item):
     album = item.get("al") or item.get("album") or {}
     return album.get("name") or ""
+
+
+def attach_covers(songs, cookie=""):
+    """给缺少封面的歌曲补上专辑图。已有封面的不再请求。"""
+    missing = [song for song in songs if song.get("id") and not song.get("cover")]
+    for start in range(0, len(missing), 100):
+        chunk = missing[start:start + 100]
+        ids = [int(song["id"]) for song in chunk]
+        detail = request("/api/song/detail", {"ids": json.dumps(ids)}, cookie=cookie)
+        by_id = {item.get("id"): _pic(item) for item in detail.get("songs") or []}
+        for song in chunk:
+            song["cover"] = by_id.get(song["id"]) or song.get("cover") or ""
+    return songs
 
 
 def _pic(item):

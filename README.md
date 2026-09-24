@@ -55,7 +55,7 @@ gapplication action io.github.shangxiaoyang.netease-music quit
 - 点进度条跳到对应位置
 - 点底部封面或歌名看歌词
 
-登录状态在 `~/.local/share/netease-cloud-music/cookie`，权限是 `0600`。不要把这个文件提交到仓库。
+登录状态在 `~/.local/share/netease-cloud-music/cookie`，权限是 `0600`。封面缓存在同目录的 `covers/`，文件名按图片地址计算，下次打开直接读本地文件。不要把 cookie 提交到仓库。
 
 ## 目录
 

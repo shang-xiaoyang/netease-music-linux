@@ -7,6 +7,7 @@
 关闭窗口后留在右下角托盘，右键可以打开或退出。
 """
 
+import hashlib
 import json
 import os
 import subprocess
@@ -229,16 +230,28 @@ def fmt_time(ms):
     return f"{seconds // 60:02d}:{seconds % 60:02d}"
 
 
-def load_pixbuf(url, size, rounded=8):
+def cover_cache_path(url, size):
+    """封面缓存在当前用户的隐藏目录里，文件名不随进程变化。"""
     os.makedirs(COVER_DIR, exist_ok=True)
-    path = os.path.join(COVER_DIR, f"{abs(hash(url))}-{size}.jpg")
-    if not os.path.exists(path):
+    digest = hashlib.sha256(url.encode("utf-8")).hexdigest()[:20]
+    return os.path.join(COVER_DIR, f"{digest}-{int(size)}.jpg")
+
+
+def load_pixbuf(url, size, rounded=8):
+    path = cover_cache_path(url, size)
+    if not os.path.exists(path) or os.path.getsize(path) < 32:
         req = urllib.request.Request(
             url + f"?param={size * 2}y{size * 2}",
             headers={"User-Agent": api.UA, "Referer": "https://music.163.com/"},
         )
         with urllib.request.urlopen(req, timeout=15) as resp:
-            open(path, "wb").write(resp.read())
+            data = resp.read()
+        if not data:
+            raise OSError("封面为空")
+        tmp = path + ".part"
+        with open(tmp, "wb") as handle:
+            handle.write(data)
+        os.replace(tmp, path)
     pix = GdkPixbuf.Pixbuf.new_from_file_at_scale(path, size, size, False)
     return pix
 
@@ -969,12 +982,23 @@ class AppWindow(Gtk.ApplicationWindow):
 
     def _fill_covers(self, songs):
         wanted = {song.get("id") for song in songs}
-        for song in songs[:80]:
-            url = song.get("cover")
-            if not url or song.get("id") not in wanted:
+        pending = [song for song in songs if song.get("id") in wanted and not song.get("cover")]
+        if pending:
+            try:
+                api.attach_covers(pending, self.cookie)
+            except api.ApiError:
+                pass
+        for song in songs:
+            if song.get("id") not in wanted:
                 continue
-            if not self.store or self.store[0][0] not in wanted:
+            if self.store is None or len(self.store) == 0:
                 return
+            visible = {row[0] for row in self.store}
+            if not wanted.intersection(visible):
+                return
+            url = song.get("cover")
+            if not url:
+                continue
             try:
                 pix = load_pixbuf(url, 36, rounded=4)
             except Exception:
