@@ -1,0 +1,4 @@
+# 运行依赖由 Debian 软件包提供，不从 PyPI 安装。
+# 见 debian/control 的 Depends。
+# 需要：python3 python3-gi python3-dbus gir1.2-gtk-3.0 gir1.2-gdkpixbuf-2.0
+# gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0 gir1.2-ayatanaappindicator3-0.1

@@ -1,0 +1,35 @@
+Source: netease-music-linux
+Section: sound
+Priority: optional
+Maintainer: Shang Xiaoyang <shangxiaoyang@kylinos.cn>
+Build-Depends: debhelper-compat (= 13)
+Standards-Version: 4.6.2
+Rules-Requires-Root: no
+Homepage: https://github.com/shang-xiaoyang/netease-music-linux
+
+Package: netease-music-linux
+Architecture: all
+Depends: ${misc:Depends},
+         python3,
+         python3-gi,
+         python3-dbus,
+         gir1.2-gtk-3.0,
+         gir1.2-gdkpixbuf-2.0,
+         gir1.2-gstreamer-1.0,
+         gir1.2-gst-plugins-base-1.0,
+         gir1.2-ayatanaappindicator3-0.1,
+         gstreamer1.0-plugins-base,
+         gstreamer1.0-plugins-good,
+         gstreamer1.0-libav,
+         gstreamer1.0-pulseaudio,
+         qrencode,
+         libayatana-appindicator3-1
+Recommends: fonts-noto-cjk, gstreamer1.0-plugins-ugly
+Description: unofficial NetEase Cloud Music player for Linux
+ A native GTK player that talks to the public NetEase Cloud Music web API.
+ It does not wrap the website and does not use Wine.
+ .
+ This package is unofficial and is not affiliated with NetEase.
+ Login, playlists and audio quality follow the account permissions
+ returned by the service. Architecture is all, so the same package
+ installs on x86, x86_64 and ARM Debian-family desktops.

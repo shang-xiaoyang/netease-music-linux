@@ -1,0 +1,7 @@
+netease-music-linux (1.1.0-1) unstable; urgency=medium
+
+  * Initial open-source packaging.
+  * Native GTK player with QR login, playlists, lyrics and tray.
+  * Do not ship third-party typelibs or the official NetEase logo.
+
+ -- Shang Xiaoyang <shangxiaoyang@kylinos.cn>  Thu, 24 Sep 2026 16:40:00 +0800

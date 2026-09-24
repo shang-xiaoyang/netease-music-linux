@@ -1,0 +1,7 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Shang Xiaoyang
+# 从源码树启动。不设置 GI_TYPELIB_PATH，使用系统已安装的 typelib。
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+cd "$ROOT" || exit 1
+exec /usr/bin/python3 "$ROOT/player.py" "$@"

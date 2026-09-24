@@ -1,0 +1,15 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=网易云音乐（非官方）
+GenericName=Music Player
+Comment=非官方 Linux 原生播放器，使用网易云音乐公开接口
+Exec=netease-music
+Icon=netease-music-linux
+Terminal=false
+Categories=Audio;Music;AudioVideo;
+StartupNotify=true
+StartupWMClass=player.py
+Keywords=netease;music;163;
+DBusActivatable=false
+X-GNOME-UsesNotifications=true

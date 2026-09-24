@@ -1,0 +1,4 @@
+#!/bin/sh
+# 安装后的启动脚本。源码树里的同名脚本用于直接从仓库运行。
+cd /usr/lib/netease-music || exit 1
+exec /usr/bin/python3 /usr/lib/netease-music/player.py "$@"

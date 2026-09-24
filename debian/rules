@@ -1,0 +1,27 @@
+#!/usr/bin/make -f
+
+export DH_VERBOSE = 1
+
+%:
+	dh $@
+
+override_dh_auto_build:
+	mkdir -p debian/icons
+	python3 debian/render-icon.py debian/icons/netease-music-linux.png
+
+override_dh_auto_install:
+	install -d debian/netease-music-linux/usr/bin
+	install -d debian/netease-music-linux/usr/lib/netease-music
+	install -d debian/netease-music-linux/usr/share/applications
+	install -d debian/netease-music-linux/usr/share/dbus-1/services
+	install -d debian/netease-music-linux/usr/share/icons/hicolor/256x256/apps
+	install -m 0755 packaging/bin/netease-music debian/netease-music-linux/usr/bin/netease-music
+	install -m 0644 player.py netease_api.py debian/netease-music-linux/usr/lib/netease-music/
+	install -m 0644 packaging/netease-music-linux.desktop debian/netease-music-linux/usr/share/applications/
+	install -m 0644 packaging/dbus/io.github.shangxiaoyang.netease-music.service \
+		debian/netease-music-linux/usr/share/dbus-1/services/
+	install -m 0644 debian/icons/netease-music-linux.png \
+		debian/netease-music-linux/usr/share/icons/hicolor/256x256/apps/
+
+override_dh_auto_test:
+	python3 -m py_compile player.py netease_api.py netease_music.py
