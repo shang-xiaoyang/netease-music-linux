@@ -9,6 +9,7 @@
 import json
 import os
 import random
+import time
 import urllib.parse
 import urllib.request
 
@@ -115,26 +116,74 @@ def top_playlist(limit=24, cookie=""):
     return [_playlist(item) for item in playlists]
 
 
-def playlist_tracks(playlist_id, cookie="", by_added=False):
-    payload = request("/api/v6/playlist/detail", {"id": playlist_id, "n": 1000}, cookie=cookie)
+def playlist_page(playlist_id, cookie="", limit=80, offset=0):
+    """歌单的一页歌曲。先拿 id，再按页补详情，避免一次拉完整张歌单。"""
+    playlist_id = int(playlist_id)
+    payload = request("/api/v6/playlist/detail", {"id": playlist_id, "n": 0}, cookie=cookie)
     playlist = payload.get("playlist") or {}
-    tracks = playlist.get("tracks") or []
-    added = {item.get("id"): item.get("at") or 0 for item in playlist.get("trackIds") or []}
-    if not tracks:
-        # 旧接口在未登录时仍返回榜单曲目。
-        legacy = request("/api/playlist/detail", {"id": playlist_id}, cookie=cookie)
-        playlist = legacy.get("result") or legacy.get("playlist") or {}
-        tracks = playlist.get("tracks") or []
-    songs = [_song(item, added.get(item.get("id")) or 0) for item in tracks]
-    if by_added and any(song.get("added") for song in songs):
-        songs.sort(key=lambda song: song.get("added") or 0, reverse=True)
+    refs = playlist.get("trackIds") or []
+    if not refs:
+        songs = _chart_songs(playlist_id, cookie)
+        return _playlist_result(playlist, playlist_id, songs, len(songs))
+    page = refs[offset:offset + limit]
+    songs = _songs_by_ids(page, cookie)
+    return _playlist_result(playlist, playlist_id, songs, len(refs))
+
+
+def playlist_tracks(playlist_id, cookie="", by_added=False):
+    """整张歌单。收藏排序仍要全部收藏时间，其余调用应优先用 playlist_page。"""
+    playlist_id = int(playlist_id)
+    payload = request("/api/v6/playlist/detail", {"id": playlist_id, "n": 0}, cookie=cookie)
+    playlist = payload.get("playlist") or {}
+    refs = playlist.get("trackIds") or []
+    if not refs:
+        songs = _chart_songs(playlist_id, cookie)
+    else:
+        songs = []
+        for start in range(0, len(refs), 100):
+            songs.extend(_songs_by_ids(refs[start:start + 100], cookie))
+        if by_added and any(song.get("added") for song in songs):
+            songs.sort(key=lambda song: song.get("added") or 0, reverse=True)
+    return _playlist_result(playlist, playlist_id, songs, len(refs) or len(songs))
+
+
+def _playlist_result(playlist, playlist_id, songs, total):
     return {
         "id": playlist.get("id") or playlist_id,
         "name": playlist.get("name") or "",
         "cover": _pic(playlist),
         "special": playlist.get("specialType") or 0,
+        "total": total,
         "songs": songs,
     }
+
+
+def _songs_by_ids(refs, cookie):
+    ids = [item.get("id") for item in refs if item.get("id")]
+    added = {item.get("id"): item.get("at") or 0 for item in refs}
+    if not ids:
+        return []
+    detail = request("/api/v3/song/detail", {"c": json.dumps([{"id": int(sid)} for sid in ids])}, cookie=cookie)
+    by_id = {item.get("id"): _song(item, added.get(item.get("id")) or 0) for item in detail.get("songs") or []}
+    songs = [by_id[sid] for sid in ids if sid in by_id]
+    if len(songs) < len(ids) // 2:
+        # v3 对部分榜单只回一半。旧详情接口能补上歌名，封面仍走 v3 已有的结果。
+        legacy = request("/api/song/detail", {"ids": json.dumps([int(sid) for sid in ids])}, cookie=cookie)
+        for item in legacy.get("songs") or []:
+            if item.get("id") in by_id:
+                continue
+            song = _song(item, added.get(item.get("id")) or 0)
+            song["cover"] = by_id.get(item.get("id"), {}).get("cover") or song.get("cover") or ""
+            by_id[item.get("id")] = song
+        songs = [by_id[sid] for sid in ids if sid in by_id]
+    return songs
+
+
+def _chart_songs(playlist_id, cookie):
+    """官方榜的 v6 详情没有曲目。榜单接口一次返回榜上的歌。"""
+    payload = request("/api/playlist/detail", {"id": int(playlist_id)}, cookie=cookie)
+    playlist = payload.get("result") or payload.get("playlist") or {}
+    return [_song(item) for item in playlist.get("tracks") or []]
 
 
 def song_url(song_id, level="lossless", cookie=""):
@@ -457,6 +506,38 @@ def likelist_playlist(cookie):
     return account, user_playlists(uid, cookie)
 
 
+def artist_home(artist_id, cookie=""):
+    """歌手首页：头像、简介、热门歌曲和专辑。没有主页的 id 会抛 ApiError。"""
+    artist_id = int(artist_id)
+    payload = request("/api/artist/head/info/get", {"id": artist_id}, cookie=cookie)
+    data = payload.get("data") or {}
+    artist = data.get("artist") or {}
+    user = data.get("user") or {}
+    if not artist and not user:
+        raise ApiError("这个歌手没有主页")
+    songs = []
+    try:
+        songs = artist_songs(artist_id, cookie)
+    except ApiError:
+        songs = []
+    albums = []
+    try:
+        albums = artist_albums(artist_id, cookie)
+    except ApiError:
+        albums = []
+    return {
+        "id": artist.get("id") or artist_id,
+        "name": artist.get("name") or user.get("nickname") or "歌手",
+        "avatar": artist.get("cover") or artist.get("avatar") or user.get("avatarUrl") or "",
+        "alias": " / ".join(artist.get("alias") or []),
+        "brief": artist.get("briefDesc") or "",
+        "albumCount": artist.get("albumSize") or len(albums),
+        "musicCount": artist.get("musicSize") or len(songs),
+        "songs": songs,
+        "albums": albums,
+    }
+
+
 def artist_songs(artist_id, cookie="", limit=50):
     """歌手热门歌曲。公开接口，不需要登录。"""
     payload = request(
@@ -471,13 +552,36 @@ def artist_songs(artist_id, cookie="", limit=50):
     return [_song(item) for item in songs]
 
 
+def artist_albums(artist_id, cookie="", limit=12):
+    payload = request(
+        "/api/artist/albums/" + str(int(artist_id)),
+        {"limit": limit, "offset": 0},
+        cookie=cookie,
+    )
+    albums = []
+    for item in payload.get("hotAlbums") or []:
+        albums.append({
+            "id": item.get("id"),
+            "name": item.get("name") or "专辑",
+            "cover": item.get("picUrl") or "",
+            "publish": _date(item.get("publishTime")),
+        })
+    return albums
+
+
 def album_detail(album_id, cookie=""):
     payload = request("/api/v1/album/" + str(int(album_id)), cookie=cookie, method="GET")
     album = payload.get("album") or {}
     songs = [_song(item) for item in payload.get("songs") or []]
+    artist = (album.get("artist") or (album.get("artists") or [None])[0] or {})
     return {
         "id": album.get("id") or album_id,
         "name": album.get("name") or "专辑",
+        "cover": album.get("picUrl") or "",
+        "company": album.get("company") or "",
+        "publish": _date(album.get("publishTime")),
+        "description": album.get("description") or album.get("briefDesc") or "",
+        "artist": {"id": artist.get("id"), "name": artist.get("name") or ""},
         "songs": songs,
     }
 
@@ -513,6 +617,18 @@ def attach_covers(songs, cookie=""):
         for song in chunk:
             song["cover"] = by_id.get(song["id"]) or song.get("cover") or ""
     return songs
+
+
+def _date(value):
+    if not value:
+        return ""
+    try:
+        stamp = int(value)
+    except (TypeError, ValueError):
+        return str(value)[:10]
+    if stamp > 10_000_000_000:
+        stamp //= 1000
+    return time.strftime("%Y-%m-%d", time.localtime(stamp))
 
 
 def _pic(item):
