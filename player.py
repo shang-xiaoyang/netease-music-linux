@@ -12,7 +12,10 @@ import json
 import os
 import subprocess
 import threading
+import time
 import urllib.request
+
+import cairo
 
 import gi
 
@@ -134,7 +137,47 @@ window {{
 .player-bar {{
     background: #FFFFFF;
     border-top: 1px solid #ECECEE;
-    padding: 6px 14px;
+    padding: 4px 14px 6px;
+}}
+.progress-row {{
+    padding: 0;
+}}
+.progress-row scale {{
+    min-width: 1px;
+    padding: 0;
+}}
+.progress-row scale trough {{
+    min-height: 4px;
+    border-radius: 2px;
+}}
+.progress-row scale highlight {{
+    border-radius: 2px;
+    background: {RED};
+}}
+.progress-row scale slider {{
+    min-width: 12px;
+    min-height: 12px;
+    margin: -5px;
+    border-radius: 8px;
+    background: {RED};
+    border: 2px solid white;
+}}
+.comment-page {{
+    background: #FFFFFF;
+}}
+.comment-card {{
+    background: #FFFFFF;
+    border-bottom: 1px solid #F0F0F2;
+    padding: 12px 16px;
+}}
+.comment-name {{
+    color: #507DAF;
+    font-size: 13px;
+    font-weight: 600;
+}}
+.comment-body {{
+    color: #333333;
+    font-size: 14px;
 }}
 .song-title {{
     color: #222;
@@ -242,6 +285,23 @@ def fmt_time(ms):
     return f"{seconds // 60:02d}:{seconds % 60:02d}"
 
 
+def fmt_comment_time(ms):
+    """评论时间按网易云的相对说法显示。"""
+    stamp = int(ms or 0) / 1000
+    if stamp <= 0:
+        return ""
+    delta = max(0, int(time.time() - stamp))
+    if delta < 60:
+        return "刚刚"
+    if delta < 3600:
+        return f"{delta // 60}分钟前"
+    if delta < 86400:
+        return f"{delta // 3600}小时前"
+    if delta < 86400 * 7:
+        return f"{delta // 86400}天前"
+    return time.strftime("%Y年%m月%d日", time.localtime(stamp))
+
+
 def cover_cache_path(url, size):
     """封面缓存在当前用户的隐藏目录里，文件名不随进程变化。"""
     os.makedirs(COVER_DIR, exist_ok=True)
@@ -265,7 +325,20 @@ def load_pixbuf(url, size, rounded=8):
             handle.write(data)
         os.replace(tmp, path)
     pix = GdkPixbuf.Pixbuf.new_from_file_at_scale(path, size, size, False)
+    if rounded:
+        return circle_pixbuf(pix)
     return pix
+
+
+def circle_pixbuf(src):
+    size = src.get_width()
+    surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, size, size)
+    ctx = cairo.Context(surface)
+    ctx.arc(size / 2, size / 2, size / 2, 0, 6.2832)
+    ctx.clip()
+    Gdk.cairo_set_source_pixbuf(ctx, src, 0, 0)
+    ctx.paint()
+    return Gdk.pixbuf_get_from_surface(surface, 0, 0, size, size)
 
 
 class Player:
@@ -536,7 +609,7 @@ class AppWindow(Gtk.ApplicationWindow):
         self.artist_label.set_ellipsize(3)
         self.artist_label.get_style_context().add_class("dim")
         meta = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        meta.set_size_request(220, -1)
+        meta.set_size_request(180, -1)
         meta.pack_start(self.title_btn, False, False, 0)
         meta.pack_start(self.artist_label, False, False, 0)
 
@@ -550,8 +623,10 @@ class AppWindow(Gtk.ApplicationWindow):
         self.play_btn.connect("leave-notify-event", lambda *_: self._play_hover(False))
         self.scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 1000, 1)
         self.scale.set_draw_value(False)
-        self.scale.set_size_request(-1, 16)
+        self.scale.set_hexpand(True)
+        self.scale.set_size_request(1, 18)
         self.scale.set_valign(Gtk.Align.CENTER)
+        self.scale.set_tooltip_text("拖动进度条可以跳转")
         self.scale.connect("button-press-event", self._seek_press)
         self.scale.connect("button-release-event", self._seek_end)
         self.scale.connect("motion-notify-event", self._seek_motion)
@@ -586,26 +661,50 @@ class AppWindow(Gtk.ApplicationWindow):
         self.quality_btn.get_style_context().add_class("bar-btn")
         self.quality_btn.set_tooltip_text("播放音质")
 
-        bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        bar.get_style_context().add_class("player-bar")
-        bar.pack_start(self.cover_btn, False, False, 0)
-        bar.pack_start(meta, False, False, 0)
-        bar.pack_start(self._icon_button("media-skip-backward-symbolic", self._prev), False, False, 0)
-        bar.pack_start(self.play_btn, False, False, 0)
-        bar.pack_start(self._icon_button("media-skip-forward-symbolic", self._next), False, False, 0)
-        bar.pack_start(self.scale, True, True, 8)
-        self.volume = Gtk.VolumeButton()
+        controls = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
+        controls.set_halign(Gtk.Align.CENTER)
+        controls.pack_start(self._icon_button("media-skip-backward-symbolic", self._prev), False, False, 0)
+        controls.pack_start(self.play_btn, False, False, 0)
+        controls.pack_start(self._icon_button("media-skip-forward-symbolic", self._next), False, False, 0)
+
+        self.volume_icon = Gtk.Image.new_from_icon_name("audio-volume-high-symbolic", Gtk.IconSize.BUTTON)
+        self.volume_icon.set_tooltip_text("音量")
+        self.volume = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 1, 0.01)
+        self.volume.set_draw_value(False)
+        self.volume.set_size_request(88, 16)
         self.volume.set_value(self._load_volume())
+        self.volume.set_tooltip_text("音量")
         self.volume.connect("value-changed", self._on_volume)
         self.player.set_volume(self.volume.get_value())
-        bar.pack_end(self.queue_btn, False, False, 0)
-        bar.pack_end(self.download_btn, False, False, 0)
-        bar.pack_end(self.comment_btn, False, False, 0)
-        bar.pack_end(self.like_btn, False, False, 0)
-        bar.pack_end(self.mode_btn, False, False, 0)
-        bar.pack_end(self.quality_btn, False, False, 0)
-        bar.pack_end(self.volume, False, False, 0)
-        bar.pack_end(self.time_label, False, False, 0)
+        volume_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        volume_box.set_valign(Gtk.Align.CENTER)
+        volume_box.pack_start(self.volume_icon, False, False, 0)
+        volume_box.pack_start(self.volume, False, False, 0)
+
+        progress = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        progress.get_style_context().add_class("progress-row")
+        progress.pack_start(self.scale, True, True, 0)
+        progress.pack_start(self.time_label, False, False, 0)
+        progress.pack_start(volume_box, False, False, 6)
+
+        actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        actions.set_halign(Gtk.Align.CENTER)
+        actions.pack_start(self.quality_btn, False, False, 0)
+        actions.pack_start(self.mode_btn, False, False, 0)
+        actions.pack_start(self.like_btn, False, False, 0)
+        actions.pack_start(self.comment_btn, False, False, 0)
+        actions.pack_start(self.download_btn, False, False, 0)
+        actions.pack_start(self.queue_btn, False, False, 0)
+
+        bar = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        bar.get_style_context().add_class("player-bar")
+        top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        top.pack_start(self.cover_btn, False, False, 0)
+        top.pack_start(meta, False, False, 0)
+        top.pack_start(progress, True, True, 8)
+        bar.pack_start(top, False, False, 0)
+        bar.pack_start(controls, False, False, 0)
+        bar.pack_start(actions, False, False, 0)
 
         self.status = Gtk.Label(label="", xalign=0)
         self.status.set_margin_start(16)
@@ -659,8 +758,15 @@ class AppWindow(Gtk.ApplicationWindow):
         except (OSError, ValueError):
             return 0.8
 
-    def _on_volume(self, _button, value):
+    def _on_volume(self, _scale, value):
         self.player.set_volume(value)
+        icon = "audio-volume-muted-symbolic" if value < 0.01 else (
+            "audio-volume-low-symbolic" if value < 0.34 else
+            "audio-volume-medium-symbolic" if value < 0.67 else
+            "audio-volume-high-symbolic"
+        )
+        if hasattr(self, "volume_icon"):
+            self.volume_icon.set_from_icon_name(icon, Gtk.IconSize.BUTTON)
         try:
             os.makedirs(DATA_DIR, exist_ok=True)
             with open(VOLUME_PATH, "w", encoding="utf-8") as handle:
@@ -1075,30 +1181,34 @@ class AppWindow(Gtk.ApplicationWindow):
         back.connect("clicked", lambda *_: self._show_page("list" if len(self.store) else "home"))
         self.comment_title = Gtk.Label(xalign=0)
         self.comment_title.get_style_context().add_class("heading")
-        hot = Gtk.Button(label="热评")
-        hot.connect("clicked", lambda *_: self._load_comment_tab("hot"))
-        latest = Gtk.Button(label="最新")
-        latest.connect("clicked", lambda *_: self._load_comment_tab("latest"))
+        self.comment_count = Gtk.Label(xalign=0)
+        self.comment_count.get_style_context().add_class("dim")
+        titles = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        titles.pack_start(self.comment_title, False, False, 0)
+        titles.pack_start(self.comment_count, False, False, 0)
+        self.comment_hot = Gtk.Button(label="精彩评论")
+        self.comment_hot.get_style_context().add_class("bar-btn")
+        self.comment_hot.set_relief(Gtk.ReliefStyle.NONE)
+        self.comment_hot.connect("clicked", lambda *_: self._load_comment_tab("hot"))
+        self.comment_latest = Gtk.Button(label="最新评论")
+        self.comment_latest.get_style_context().add_class("bar-btn")
+        self.comment_latest.set_relief(Gtk.ReliefStyle.NONE)
+        self.comment_latest.connect("clicked", lambda *_: self._load_comment_tab("latest"))
         more = Gtk.Button(label="更多")
+        more.get_style_context().add_class("flat")
         more.connect("clicked", lambda *_: self._comment_more())
         bar.pack_start(back, False, False, 8)
-        bar.pack_start(self.comment_title, True, True, 0)
+        bar.pack_start(titles, True, True, 0)
         bar.pack_end(more, False, False, 8)
-        bar.pack_end(latest, False, False, 0)
-        bar.pack_end(hot, False, False, 0)
-        self.comment_store = Gtk.ListStore(str, str, str)
-        view = Gtk.TreeView(model=self.comment_store, headers_visible=False)
-        nick = Gtk.CellRendererText()
-        body = Gtk.CellRendererText(ellipsize=3, wrap_width=560)
-        column = Gtk.TreeViewColumn()
-        column.pack_start(nick, False)
-        column.pack_start(body, True)
-        column.add_attribute(nick, "text", 0)
-        column.add_attribute(body, "text", 1)
-        view.append_column(column)
+        bar.pack_end(self.comment_latest, False, False, 0)
+        bar.pack_end(self.comment_hot, False, False, 0)
+        self.comment_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        self.comment_box.set_margin_top(4)
         scroll = Gtk.ScrolledWindow()
-        scroll.add(view)
+        scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scroll.add(self.comment_box)
         page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        page.get_style_context().add_class("comment-page")
         page.pack_start(bar, False, False, 6)
         page.pack_start(scroll, True, True, 0)
         self.comment_page = page
@@ -1112,6 +1222,7 @@ class AppWindow(Gtk.ApplicationWindow):
         self.comment_song = song
         self.comment_offset = 0
         self.comment_title.set_text(song.get("name") or "评论")
+        self.comment_count.set_text("评论加载中")
         self._show_page("comments")
         self._status("正在加载评论…")
         self._bg(lambda: self._fetch_comments(song, 0))
@@ -1140,16 +1251,53 @@ class AppWindow(Gtk.ApplicationWindow):
     def _render_comments(self):
         data = getattr(self, "comment_data", None) or {}
         rows = data.get(self.comment_tab) or []
-        self.comment_store.clear()
-        for item in rows:
-            self.comment_store.append([
-                item.get("nickname") or "",
-                item.get("content") or "",
-                str(item.get("liked") or 0),
-            ])
+        for child in self.comment_box.get_children():
+            self.comment_box.remove(child)
+        total = data.get("total") or 0
+        tab = "精彩评论" if self.comment_tab == "hot" else "最新评论"
+        self.comment_count.set_text(f"{tab} · {total} 条" if total else tab)
         if not rows:
-            self.comment_store.append(["", "没有评论", ""])
+            empty = Gtk.Label(label="还没有评论")
+            empty.set_margin_top(48)
+            empty.get_style_context().add_class("dim")
+            self.comment_box.pack_start(empty, False, False, 0)
+        for item in rows:
+            self.comment_box.pack_start(self._comment_card(item), False, False, 0)
+        self.comment_box.show_all()
         return False
+
+    def _comment_card(self, item):
+        avatar = Gtk.Image.new_from_icon_name("avatar-default-symbolic", Gtk.IconSize.DND)
+        avatar.set_size_request(36, 36)
+        avatar.set_valign(Gtk.Align.START)
+        if item.get("avatar"):
+            self._bg(lambda url=item["avatar"], widget=avatar: self._set_remote_image(url, widget, 36, rounded=True))
+        name = Gtk.Label(label=item.get("nickname") or "用户", xalign=0)
+        name.get_style_context().add_class("comment-name")
+        name.set_ellipsize(3)
+        when = Gtk.Label(label=fmt_comment_time(item.get("time")), xalign=0)
+        when.get_style_context().add_class("dim")
+        head = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        head.pack_start(name, False, False, 0)
+        head.pack_start(when, False, False, 0)
+        body = Gtk.Label(label=item.get("content") or "", xalign=0)
+        body.set_line_wrap(True)
+        body.set_line_wrap_mode(2)
+        body.set_max_width_chars(48)
+        body.set_selectable(True)
+        body.get_style_context().add_class("comment-body")
+        text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        text.pack_start(head, False, False, 0)
+        text.pack_start(body, False, False, 0)
+        liked = Gtk.Label(label=f"♡ {item.get('liked') or 0}")
+        liked.get_style_context().add_class("dim")
+        liked.set_valign(Gtk.Align.START)
+        card = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        card.get_style_context().add_class("comment-card")
+        card.pack_start(avatar, False, False, 0)
+        card.pack_start(text, True, True, 0)
+        card.pack_end(liked, False, False, 0)
+        return card
 
     def _build_download_page(self):
         bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
@@ -1160,9 +1308,9 @@ class AppWindow(Gtk.ApplicationWindow):
         title.get_style_context().add_class("heading")
         bar.pack_start(back, False, False, 8)
         bar.pack_start(title, False, False, 0)
-        self.download_store = Gtk.ListStore(str, str, str)
+        self.download_store = Gtk.ListStore(str, str, str, str)
         view = Gtk.TreeView(model=self.download_store, headers_visible=True)
-        for idx, name, width in ((0, "歌曲", 220), (1, "状态", 120), (2, "文件", 280)):
+        for idx, name, width in ((0, "歌曲", 200), (1, "状态", 90), (2, "音质", 140), (3, "文件", 240)):
             column = Gtk.TreeViewColumn(name, Gtk.CellRendererText(ellipsize=3), text=idx)
             column.set_min_width(width)
             view.append_column(column)
@@ -1177,9 +1325,15 @@ class AppWindow(Gtk.ApplicationWindow):
         if not song or not song.get("id"):
             self._status("没有可下载的歌曲")
             return
-        self.downloads.append({"song": song, "status": "等待", "path": ""})
+        self.downloads.append({
+            "song": song,
+            "status": "等待",
+            "path": "",
+            "quality": self.quality,
+            "level": "",
+        })
         self._refresh_download_view()
-        self._status(f"已加入下载：{song.get('name') or ''}")
+        self._status(f"已加入下载：{song.get('name') or ''} · {self._quality_name(self.quality)}")
         if self.download_worker is None or not self.download_worker.is_alive():
             self.download_worker = threading.Thread(target=self._download_loop, daemon=True)
             self.download_worker.start()
@@ -1190,9 +1344,11 @@ class AppWindow(Gtk.ApplicationWindow):
         self.download_store.clear()
         for item in self.downloads:
             song = item["song"]
+            level = item.get("level") or item.get("quality") or ""
             self.download_store.append([
                 song.get("name") or "",
                 item.get("status") or "",
+                self._quality_name(level),
                 os.path.basename(item.get("path") or ""),
             ])
         return False
@@ -1204,7 +1360,7 @@ class AppWindow(Gtk.ApplicationWindow):
             item["status"] = "下载中"
             GLib.idle_add(self._refresh_download_view)
             try:
-                path = self._download_one(item["song"])
+                path, level = self._download_one(item["song"], item.get("quality") or self.quality)
             except Exception as exc:
                 item["status"] = f"失败：{exc}"
                 GLib.idle_add(self._notify, "下载失败", item["song"].get("name") or "")
@@ -1212,14 +1368,25 @@ class AppWindow(Gtk.ApplicationWindow):
                 continue
             item["status"] = "完成"
             item["path"] = path
+            item["level"] = level
             self._index_local(path, item["song"])
             GLib.idle_add(self._notify, "下载完成", os.path.basename(path))
             GLib.idle_add(self._refresh_download_view)
 
-    def _download_one(self, song):
-        info = api.song_url(song["id"], level=self.quality, cookie=self.cookie)
+    def _quality_name(self, level):
+        for key, name, _hint in api.QUALITIES:
+            if key == level:
+                return name
+        if level == "local":
+            return "本地文件"
+        return api.QUALITY_LABEL.get(level, level or "")
+
+    def _download_one(self, song, level):
+        # 下载档位是加入队列时播放条上的音质。接口按账号权限降级，实际档位记在返回值里。
+        info = api.song_url(song["id"], level=level, cookie=self.cookie)
         if not info or not info.get("url"):
             raise api.ApiError("没有可下载地址")
+        got = info.get("level") or level
         folder = os.path.join(GLib.get_user_special_dir(GLib.UserDirectory.DIRECTORY_MUSIC) or os.path.expanduser("~/Music"), "网易云音乐")
         os.makedirs(folder, exist_ok=True)
         ext = info.get("type") or "mp3"
@@ -1235,7 +1402,7 @@ class AppWindow(Gtk.ApplicationWindow):
                 handle.write(chunk)
         os.replace(dest + ".part", dest)
         self._write_audio_tags(dest, song)
-        return dest
+        return dest, got
 
     def _write_audio_tags(self, path, song):
         # 只写 ID3 标题和歌手。没有额外依赖，失败也不影响文件本身。
@@ -1576,9 +1743,9 @@ class AppWindow(Gtk.ApplicationWindow):
             self._bg(lambda url=item["cover"], widget=image: self._set_remote_image(url, widget, 120))
         return button
 
-    def _set_remote_image(self, url, widget, size):
+    def _set_remote_image(self, url, widget, size, rounded=False):
         try:
-            pix = load_pixbuf(url, size)
+            pix = load_pixbuf(url, size, rounded=18 if rounded else 0)
         except Exception:
             return
         GLib.idle_add(widget.set_from_pixbuf, pix)

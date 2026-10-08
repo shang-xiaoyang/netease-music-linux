@@ -1,3 +1,11 @@
+netease-music-linux (1.2.1-1) unstable; urgency=medium
+
+  * Give the progress bar its own row so the slider is no longer a lone circle.
+  * Render comments as cards with avatar, time and like count.
+  * Download at the playback quality selected when the song was queued.
+
+ -- Shang Xiaoyang <shangxiaoyang@kylinos.cn>  Thu, 08 Oct 2026 12:20:00 +0800
+
 netease-music-linux (1.2.0-1) unstable; urgency=medium
 
   * Add volume, keyboard shortcuts, song menu and window memory.
