@@ -1,3 +1,11 @@
+netease-music-linux (1.2.0-1) unstable; urgency=medium
+
+  * Add volume, keyboard shortcuts, song menu and window memory.
+  * Scroll and highlight lyrics. Browse comments, FM and play history.
+  * Download songs and play a local file when one is already saved.
+
+ -- Shang Xiaoyang <shangxiaoyang@kylinos.cn>  Thu, 24 Sep 2026 17:40:00 +0800
+
 netease-music-linux (1.1.0-1) unstable; urgency=medium
 
   * Initial open-source packaging.

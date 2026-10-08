@@ -199,6 +199,77 @@ def lyric(song_id, cookie=""):
     return (payload.get("lrc") or {}).get("lyric") or ""
 
 
+def lyric_pair(song_id, cookie=""):
+    """原文和翻译。翻译可能为空。"""
+    payload = request(
+        "/api/song/lyric",
+        {"id": int(song_id), "lv": -1, "tv": -1},
+        cookie=cookie,
+    )
+    return (
+        (payload.get("lrc") or {}).get("lyric") or "",
+        (payload.get("tlyric") or {}).get("lyric") or "",
+    )
+
+
+def like_song(song_id, like, cookie):
+    request(
+        "/api/song/like",
+        {"id": int(song_id), "like": "true" if like else "false"},
+        cookie=cookie,
+    )
+
+
+def comments(song_id, offset=0, limit=20, cookie=""):
+    payload = request(
+        f"/api/v1/resource/comments/R_SO_4_{int(song_id)}",
+        {"limit": limit, "offset": offset},
+        cookie=cookie,
+    )
+    return {
+        "hot": [_comment(item) for item in payload.get("hotComments") or []],
+        "latest": [_comment(item) for item in payload.get("comments") or []],
+        "total": payload.get("total") or 0,
+        "more": bool(payload.get("more")),
+    }
+
+
+def _comment(item):
+    user = item.get("user") or {}
+    return {
+        "id": item.get("commentId"),
+        "content": item.get("content") or "",
+        "nickname": user.get("nickname") or "",
+        "avatar": user.get("avatarUrl") or "",
+        "liked": item.get("likedCount") or 0,
+        "time": item.get("time") or 0,
+    }
+
+
+def personal_fm(cookie):
+    payload = request("/api/v1/radio/get", cookie=cookie)
+    return [_song(item) for item in payload.get("data") or []]
+
+
+def fm_trash(song_id, cookie):
+    request("/api/radio/trash/add", {"songId": int(song_id)}, cookie=cookie)
+
+
+def play_record(uid, cookie, weekly=True):
+    payload = request(
+        "/api/v1/play/record",
+        {"uid": uid, "type": 1 if weekly else 0},
+        cookie=cookie,
+    )
+    key = "weekData" if weekly else "allData"
+    songs = []
+    for item in payload.get(key) or []:
+        song = _song(item.get("song") or {})
+        song["playCount"] = item.get("playCount") or 0
+        songs.append(song)
+    return songs
+
+
 def login_qr_key():
     payload = request("/api/login/qrcode/unikey", {"type": 1})
     key = payload.get("unikey")
@@ -411,6 +482,18 @@ def _playlist(item):
         "special": item.get("specialType") or 0,
         "added": item.get("createTime") or 0,
     }
+
+
+def merge_lrc(original, translation):
+    """同一时间戳的翻译紧跟原文，方便歌词页同屏显示。"""
+    translated = {ms: line for ms, line in parse_lrc(translation)}
+    merged = []
+    for ms, line in parse_lrc(original):
+        merged.append((ms, line))
+        extra = translated.get(ms)
+        if extra and extra != line:
+            merged.append((ms, extra))
+    return merged
 
 
 def parse_lrc(text):
