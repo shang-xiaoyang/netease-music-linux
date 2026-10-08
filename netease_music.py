@@ -25,7 +25,7 @@ gi.require_version("WebKit2", "4.1")
 
 from gi.repository import Gdk, Gio, GLib, Gtk, WebKit2
 
-APP_ID = "io.github.shangxiaoyang.netease-music"
+APP_ID = "io.netease-music-linux"
 HOME_URL = "https://music.163.com/"
 USER_AGENT = (
     "Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/605.1.15 "
@@ -274,9 +274,11 @@ class NeteaseWindow(Gtk.ApplicationWindow):
 
     def _on_download_started(self, _context, download):
         def decide(_download, suggested):
-            name = suggested or "download"
-            name = os.path.basename(name.replace("\\", "/")) or "download"
+            name = os.path.basename(str(suggested or "download").replace("\\", "/")) or "download"
+            name = name.replace("\x00", "").strip(" .") or "download"
             dest = os.path.join(DOWNLOAD_DIR, name)
+            if os.path.commonpath((os.path.abspath(DOWNLOAD_DIR), os.path.abspath(dest))) != os.path.abspath(DOWNLOAD_DIR):
+                return False
             base, ext = os.path.splitext(dest)
             n = 1
             while os.path.exists(dest):

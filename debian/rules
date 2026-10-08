@@ -16,8 +16,9 @@ override_dh_auto_install:
 	install -d debian/netease-music-linux/usr/share/dbus-1/services
 	install -m 0755 packaging/bin/netease-music debian/netease-music-linux/usr/bin/netease-music
 	install -m 0644 player.py netease_api.py debian/netease-music-linux/usr/lib/netease-music/
+	install -m 0644 debian/icons/256.png debian/netease-music-linux/usr/lib/netease-music/icon.png
 	install -m 0644 packaging/netease-music-linux.desktop debian/netease-music-linux/usr/share/applications/
-	install -m 0644 packaging/dbus/io.github.shangxiaoyang.netease-music.service \
+	install -m 0644 packaging/dbus/io.netease-music-linux.service \
 		debian/netease-music-linux/usr/share/dbus-1/services/
 	for size in 16 22 24 32 48 64 128 256 512; do \
 		install -d debian/netease-music-linux/usr/share/icons/hicolor/$${size}x$${size}/apps; \
@@ -26,4 +27,4 @@ override_dh_auto_install:
 	done
 
 override_dh_auto_test:
-	python3 -m py_compile player.py netease_api.py netease_music.py
+	python3 -m py_compile player.py netease_api.py

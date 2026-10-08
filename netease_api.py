@@ -57,6 +57,8 @@ def _cookie_header(cookie):
 
 
 def request(path, data=None, cookie="", method=None):
+    if path.startswith(("http://", "https://")) and not path.startswith(API + "/"):
+        raise ApiError("只请求网易云音乐接口")
     url = path if path.startswith("http") else API + path
     body = None
     if data is not None:
@@ -155,8 +157,14 @@ def song_url(song_id, level="lossless", cookie=""):
         item = (legacy.get("data") or [None])[0] or {}
     if not item.get("url"):
         return None
+    url = str(item["url"]).replace("http://", "https://", 1)
+    host = urllib.parse.urlparse(url).hostname or ""
+    if urllib.parse.urlparse(url).scheme != "https" or not (
+        host == "music.163.com" or host.endswith(".music.163.com") or host.endswith(".126.net")
+    ):
+        return None
     return {
-        "url": item["url"].replace("http://", "https://"),
+        "url": url,
         "br": item.get("br") or 0,
         "size": item.get("size") or 0,
         "type": item.get("type") or "mp3",
@@ -213,9 +221,41 @@ def lyric_pair(song_id, cookie=""):
 
 
 def like_song(song_id, like, cookie):
+    # 这个接口认 trackId。传 id 会直接返回「请求参数错误」。
     request(
         "/api/song/like",
-        {"id": int(song_id), "like": "true" if like else "false"},
+        {"trackId": int(song_id), "like": "true" if like else "false"},
+        cookie=cookie,
+    )
+
+
+def liked_ids(cookie):
+    """红心歌曲 id。顺序不是收藏时间，只用来同步爱心状态。"""
+    payload = request("/api/song/like/get", cookie=cookie, method="POST", data={})
+    return [int(item) for item in (payload.get("ids") or [])]
+
+
+def add_playlist_track(playlist_id, song_id, cookie):
+    """把歌曲加进自己创建的歌单。没有权限时接口会返回错误。"""
+    _manipulate_track(playlist_id, song_id, "add", cookie)
+
+
+def remove_playlist_track(playlist_id, song_id, cookie):
+    """从自己创建的歌单移除。歌单里没有这首歌时接口也返回成功，调用前要自己确认。"""
+    _manipulate_track(playlist_id, song_id, "del", cookie)
+
+
+def playlist_track_ids(playlist_id, cookie=""):
+    """只取曲目 id，用来判断歌曲在不在自建歌单里。"""
+    payload = request("/api/v6/playlist/detail", {"id": int(playlist_id), "n": 0}, cookie=cookie)
+    playlist = payload.get("playlist") or {}
+    return [int(item.get("id")) for item in playlist.get("trackIds") or [] if item.get("id")]
+
+
+def _manipulate_track(playlist_id, song_id, op, cookie):
+    request(
+        "/api/playlist/manipulate/tracks",
+        {"op": op, "pid": int(playlist_id), "trackIds": f"[{int(song_id)}]"},
         cookie=cookie,
     )
 
@@ -398,8 +438,7 @@ def liked_songs(cookie):
         data = playlist_tracks(playlist_id, cookie=cookie, by_added=True)
         if data["songs"]:
             return data["songs"]
-    ids = request("/api/song/like/get", cookie=cookie, method="POST", data={})
-    song_ids = [int(item) for item in (ids.get("ids") or [])]
+    song_ids = liked_ids(cookie)
     songs = []
     for start in range(0, len(song_ids), 100):
         chunk = song_ids[start:start + 100]
@@ -418,16 +457,44 @@ def likelist_playlist(cookie):
     return account, user_playlists(uid, cookie)
 
 
+def artist_songs(artist_id, cookie="", limit=50):
+    """歌手热门歌曲。公开接口，不需要登录。"""
+    payload = request(
+        "/api/v1/artist/songs",
+        {"id": int(artist_id), "limit": limit, "offset": 0, "order": "hot"},
+        cookie=cookie,
+    )
+    songs = payload.get("songs") or []
+    if not songs:
+        legacy = request("/api/artist/top/song", {"id": int(artist_id)}, cookie=cookie)
+        songs = legacy.get("songs") or []
+    return [_song(item) for item in songs]
+
+
+def album_detail(album_id, cookie=""):
+    payload = request("/api/v1/album/" + str(int(album_id)), cookie=cookie, method="GET")
+    album = payload.get("album") or {}
+    songs = [_song(item) for item in payload.get("songs") or []]
+    return {
+        "id": album.get("id") or album_id,
+        "name": album.get("name") or "专辑",
+        "songs": songs,
+    }
+
+
 def recommend_songs(cookie):
     payload = request("/api/v1/discovery/recommend/songs", cookie=cookie, method="POST", data={})
     daily = ((payload.get("data") or {}).get("dailySongs") or [])
     return [_song(item) for item in daily]
 
 
-def _artists(item):
+def _artist_rows(item):
     artists = item.get("ar") or item.get("artists") or []
-    names = [a.get("name") for a in artists if a.get("name")]
-    return " / ".join(names)
+    return [{"id": artist.get("id"), "name": artist.get("name") or ""} for artist in artists if artist.get("name")]
+
+
+def _artists(item):
+    return " / ".join(artist["name"] for artist in _artist_rows(item))
 
 
 def _album(item):
@@ -436,12 +503,12 @@ def _album(item):
 
 
 def attach_covers(songs, cookie=""):
-    """给缺少封面的歌曲补上专辑图。已有封面的不再请求。"""
+    """按歌曲详情补齐专辑图。旧的 /api/song/detail 不再返回封面，不能拿来覆盖已有地址。"""
     missing = [song for song in songs if song.get("id") and not song.get("cover")]
     for start in range(0, len(missing), 100):
         chunk = missing[start:start + 100]
-        ids = [int(song["id"]) for song in chunk]
-        detail = request("/api/song/detail", {"ids": json.dumps(ids)}, cookie=cookie)
+        body = json.dumps([{"id": int(song["id"])} for song in chunk])
+        detail = request("/api/v3/song/detail", {"c": body}, cookie=cookie)
         by_id = {item.get("id"): _pic(item) for item in detail.get("songs") or []}
         for song in chunk:
             song["cover"] = by_id.get(song["id"]) or song.get("cover") or ""
@@ -459,11 +526,16 @@ def _pic(item):
 
 
 def _song(item, added=0):
+    album = item.get("al") or item.get("album") or {}
+    artists = _artist_rows(item)
     return {
         "id": item.get("id"),
         "name": item.get("name") or "未命名",
-        "artist": _artists(item),
-        "album": _album(item),
+        "artist": " / ".join(artist["name"] for artist in artists),
+        "artists": artists,
+        "artistId": artists[0]["id"] if artists else None,
+        "album": album.get("name") or "",
+        "albumId": album.get("id"),
         "cover": _pic(item),
         "duration": item.get("dt") or item.get("duration") or 0,
         "fee": item.get("fee") or 0,
@@ -479,6 +551,7 @@ def _playlist(item):
         "cover": item.get("coverImgUrl") or "",
         "count": item.get("trackCount") or 0,
         "creator": creator.get("userId") or item.get("userId"),
+        "mine": bool(item.get("mine")),
         "special": item.get("specialType") or 0,
         "added": item.get("createTime") or 0,
     }
@@ -532,7 +605,11 @@ def load_cookie(path):
 
 
 def save_cookie(path, cookie):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as handle:
+    folder = os.path.dirname(path)
+    os.makedirs(folder, exist_ok=True)
+    os.chmod(folder, 0o700)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    descriptor = os.open(path, flags, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
         handle.write(cookie.strip() + "\n")
     os.chmod(path, 0o600)

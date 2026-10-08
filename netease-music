@@ -4,4 +4,5 @@
 # 从源码树启动。不设置 GI_TYPELIB_PATH，使用系统已安装的 typelib。
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 cd "$ROOT" || exit 1
+python3 "$ROOT/debian/render-icon.py" "$ROOT/icon.png"
 exec /usr/bin/python3 "$ROOT/player.py" "$@"

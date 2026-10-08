@@ -27,7 +27,7 @@ sudo apt install python3 python3-gi python3-dbus python3-pil \
 dpkg-buildpackage -us -uc -b
 ```
 
-产物是 `Architecture: all` 的 deb。安装：
+当前版本是 1.2.2。产物是 `Architecture: all` 的 deb。安装：
 
 ```sh
 sudo apt install ./netease-music-linux_*_all.deb
@@ -38,7 +38,7 @@ sudo apt install ./netease-music-linux_*_all.deb
 关闭窗口不会停止播放，图标留在托盘。左键打开主窗口，右键可选「显示主界面」或「退出」。也可以用 Ctrl+Q，或在终端执行：
 
 ```sh
-gapplication action io.github.shangxiaoyang.netease-music quit
+gapplication action io.netease-music-linux quit
 ```
 
 应用 ID 是独立反向域名，不用 `cn.netease`，避免和官方客户端抢 D-Bus 名。
@@ -70,7 +70,6 @@ gapplication action io.github.shangxiaoyang.netease-music quit
 | --- | --- |
 | `player.py` | GTK 主界面和播放 |
 | `netease_api.py` | 登录、搜索、歌单、播放地址 |
-| `netease_music.py` | 旧的网页套壳，默认不启动 |
-| `netease-music` | 从源码树启动 |
+| `netease-music` | 从源码树启动，并生成托盘用的图标 |
 | `packaging/` | 安装后的启动脚本、desktop、D-Bus service |
 | `debian/` | Debian 打包目录 |

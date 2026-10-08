@@ -8,6 +8,7 @@
 """
 
 import hashlib
+import io
 import json
 import os
 import subprocess
@@ -24,7 +25,7 @@ gi.require_version("Gdk", "3.0")
 gi.require_version("GdkPixbuf", "2.0")
 gi.require_version("Gst", "1.0")
 
-from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gst, Gtk
+from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gst, Gtk, Pango
 
 try:
     gi.require_version("AyatanaAppIndicator3", "0.1")
@@ -36,28 +37,25 @@ import netease_api as api
 
 Gst.init(None)
 
-APP_ID = "io.github.shangxiaoyang.netease-music"
+APP_ID = "io.netease-music-linux"
 DATA_DIR = os.path.join(GLib.get_user_data_dir(), "netease-cloud-music")
 COOKIE_PATH = os.path.join(DATA_DIR, "cookie")
 QUALITY_PATH = os.path.join(DATA_DIR, "quality")
 VOLUME_PATH = os.path.join(DATA_DIR, "volume")
 WINDOW_PATH = os.path.join(DATA_DIR, "window.json")
 STATE_PATH = os.path.join(DATA_DIR, "state.json")
+RECENT_PATH = os.path.join(DATA_DIR, "recent-playlists.json")
 MODE_PATH = os.path.join(DATA_DIR, "play-mode")
 COVER_DIR = os.path.join(DATA_DIR, "covers")
 RED = "#EC4141"
 def _icon_path():
-    """任务栏按图标名找小尺寸。用户主题优先，避免读到源码树里的旧图。"""
-    roots = (
-        os.path.join(GLib.get_home_dir(), ".local/share/icons/hicolor"),
-        "/usr/share/icons/hicolor",
-    )
-    for root in roots:
-        for size in (48, 32, 24, 22, 64, 128, 256):
-            path = os.path.join(root, f"{size}x{size}", "apps", "netease-music-linux.png")
-            if os.path.exists(path):
-                return path
-    return "audio-x-generic"
+    """任务栏和托盘都只用随程序打包的图标，不读用户主题或旧缓存。"""
+    root = os.path.dirname(os.path.abspath(__file__))
+    for name in ("icon.png", "netease-music-linux.png"):
+        path = os.path.join(root, name)
+        if os.path.isfile(path):
+            return path
+    return ""
 
 
 ICON = _icon_path()
@@ -73,7 +71,7 @@ window {{
     border-right: 1px solid #ECECEE;
 }}
 .brand {{
-    font-size: 16px;
+    font-size: 14px;
     font-weight: 700;
     color: #222;
 }}
@@ -81,13 +79,22 @@ window {{
     border-radius: 8px;
     margin: 1px 10px;
     min-height: 34px;
+    padding: 0 8px;
     color: #333;
     background: transparent;
+}}
+.side-row image {{
+    color: #8A8A90;
+}}
+.side-row label {{
+    color: #333;
 }}
 .side-row:hover {{
     background: #F3F3F5;
 }}
-.side-row.current {{
+.side-row.current,
+.side-row.current image,
+.side-row.current label {{
     background: {RED};
     color: white;
 }}
@@ -129,25 +136,73 @@ window {{
 .song-list, .song-list treeview {{
     background: #FFFFFF;
     color: #222;
+    font-size: 9px;
 }}
 .song-list treeview:selected {{
     background: #FDECEC;
     color: #222;
 }}
-.player-bar {{
+.song-list treeview header button {{
     background: #FFFFFF;
-    border-top: 1px solid #ECECEE;
-    padding: 4px 14px 6px;
+    color: #8E8E93;
+    font-size: 9px;
+    border: none;
+    border-bottom: 1px solid #F0F0F2;
+    padding: 4px 6px;
 }}
-.progress-row {{
-    padding: 0;
+.queue-list, .queue-list treeview {{
+    background: #FFFFFF;
+    color: #222;
+    font-size: 12px;
+}}
+.queue-list treeview:selected {{
+    background: #FDECEC;
+    color: #222;
+}}
+.queue-list treeview header button {{
+    background: #FFFFFF;
+    color: #A0A0A6;
+    font-size: 11px;
+    font-weight: 400;
+    border: none;
+    border-bottom: 1px solid #F0F0F2;
+    padding: 2px 4px;
+    min-height: 22px;
+}}
+.col-index {{
+    color: #B0B0B6;
+    font-size: 12px;
+}}
+.col-title {{
+    color: #222;
+    font-size: 13px;
+}}
+.col-vip {{
+    color: {RED};
+    font-size: 10px;
+    font-weight: 700;
+}}
+.col-sub {{
+    color: #8E8E93;
+    font-size: 12px;
+}}
+.col-meta {{
+    color: #8E8E93;
+    font-size: 12px;
+}}
+.player-bar {{
+    background: @theme_bg_color;
+    color: @theme_fg_color;
+    border-top: 1px solid @borders;
+    padding: 6px 10px;
 }}
 .progress-row scale {{
     min-width: 1px;
-    padding: 0;
+    padding-top: 0;
+    padding-bottom: 0;
 }}
 .progress-row scale trough {{
-    min-height: 4px;
+    min-height: 3px;
     border-radius: 2px;
 }}
 .progress-row scale highlight {{
@@ -155,12 +210,11 @@ window {{
     background: {RED};
 }}
 .progress-row scale slider {{
-    min-width: 12px;
-    min-height: 12px;
-    margin: -5px;
+    min-width: 10px;
+    min-height: 10px;
+    margin: -4px;
     border-radius: 8px;
     background: {RED};
-    border: 2px solid white;
 }}
 .comment-page {{
     background: #FFFFFF;
@@ -189,44 +243,75 @@ window {{
     font-size: 12px;
 }}
 button.play-main {{
-    border-radius: 22px;
-    min-width: 44px;
-    min-height: 44px;
+    border-radius: 18px;
+    min-width: 34px;
+    min-height: 34px;
     padding: 0;
     background: transparent;
-    color: #222222;
+    color: @theme_fg_color;
+    border: 1.5px solid alpha(@theme_fg_color, 0.55);
+    box-shadow: none;
+}}
+button.play-main:hover {{
+    background: alpha({RED}, 0.12);
+    color: {RED};
+    border-color: {RED};
+}}
+button.transport {{
+    border-radius: 16px;
+    min-width: 30px;
+    min-height: 30px;
+    padding: 2px;
+    background: transparent;
+    color: @theme_fg_color;
     border: none;
     box-shadow: none;
 }}
-button.play-main:hover,
-button.play-main:active {{
-    background: {RED};
-    color: white;
+button.transport:hover,
+button.transport:hover image {{
+    background: alpha({RED}, 0.16);
+    color: {RED};
+}}
+button.icon-btn {{
+    border-radius: 8px;
+    min-width: 32px;
+    min-height: 32px;
+    padding: 4px;
+    background: transparent;
+    color: @theme_fg_color;
+    border: none;
+    box-shadow: none;
+}}
+button.icon-btn:hover {{
+    background: alpha(@theme_fg_color, 0.08);
+    color: {RED};
+}}
+button.icon-btn.liked {{
+    color: {RED};
 }}
 button.flat {{
     border: none;
     background: transparent;
-    color: #222222;
+    color: @theme_fg_color;
     box-shadow: none;
 }}
-button.bar-btn {{
-    background: #FFFFFF;
-    color: #222222;
-    border: 1px solid #E2E2E6;
-    border-radius: 8px;
-    padding: 4px 10px;
+button.quality-btn {{
+    background: alpha(@theme_fg_color, 0.06);
+    color: @theme_fg_color;
+    border: none;
+    border-radius: 11px;
+    padding: 0 10px;
+    min-height: 22px;
+    font-size: 11px;
     box-shadow: none;
 }}
-button.bar-btn:hover {{
-    background: #F6F6F8;
-    color: #222222;
+button.quality-btn:hover {{
+    background: alpha({RED}, 0.12);
+    color: {RED};
 }}
-button.bar-btn:active {{
-    background: #FDECEC;
-    color: #222222;
-}}
-button.bar-btn label {{
-    color: #222222;
+button.quality-btn label {{
+    color: inherit;
+    font-size: 11px;
 }}
 button.cover-btn {{
     padding: 0;
@@ -239,13 +324,72 @@ button.cover-btn {{
     border: 1px solid #E2E2E6;
     border-radius: 10px;
 }}
+.queue-head {{
+    font-size: 13px;
+    font-weight: 600;
+    color: #222;
+}}
 .lyric-page {{
-    background: #F7F7F8;
+    background: #1C1C1E;
 }}
 .lyric-page textview, .lyric-page text {{
     background: transparent;
-    color: #222;
+    color: alpha(white, 0.38);
+    font-size: 16px;
+}}
+.lyric-song {{
+    color: white;
     font-size: 22px;
+    font-weight: 700;
+}}
+.lyric-artist {{
+    color: alpha(white, 0.62);
+    font-size: 13px;
+}}
+.bar-title {{
+    color: @theme_fg_color;
+    font-size: 13px;
+    font-weight: 600;
+}}
+.bar-artist {{
+    color: alpha(@theme_fg_color, 0.55);
+    font-size: 12px;
+}}
+button.back-btn {{
+    min-width: 28px;
+    min-height: 28px;
+    padding: 2px;
+    border: none;
+    border-radius: 14px;
+    background: alpha(@theme_fg_color, 0.06);
+    color: @theme_fg_color;
+    box-shadow: none;
+}}
+button.back-btn:hover {{
+    background: alpha({RED}, 0.14);
+    color: {RED};
+}}
+.lyric-page button.back-btn {{
+    background: alpha(white, 0.08);
+    color: white;
+}}
+.lyric-page button.back-btn:hover {{
+    background: alpha(white, 0.16);
+    color: white;
+}}
+button.text-btn {{
+    border: none;
+    background: transparent;
+    color: alpha(@theme_fg_color, 0.62);
+    padding: 2px 8px;
+    box-shadow: none;
+}}
+button.text-btn:hover {{
+    color: {RED};
+}}
+button.text-btn.on {{
+    color: {RED};
+    font-weight: 700;
 }}
 entry {{
     border-radius: 16px;
@@ -279,6 +423,187 @@ menu menuitem:checked, menuitem:checked label {{
 CARD_COLORS = ("#3B6CFF", "#7A4DFF", "#2F8CFF", "#E23B3B", "#F08A2A")
 
 
+def _tint_pixbuf(pixbuf, red, green, blue):
+    """把单色图标染成指定颜色，保留原来的透明度。"""
+    tinted = pixbuf.copy()
+    pixels = bytearray(tinted.get_pixels())
+    channels = tinted.get_n_channels()
+    rowstride = tinted.get_rowstride()
+    width, height = tinted.get_width(), tinted.get_height()
+    for y in range(height):
+        row = y * rowstride
+        for x in range(width):
+            offset = row + x * channels
+            alpha = pixels[offset + 3]
+            if not alpha:
+                continue
+            pixels[offset] = int(red * 255)
+            pixels[offset + 1] = int(green * 255)
+            pixels[offset + 2] = int(blue * 255)
+    return GdkPixbuf.Pixbuf.new_from_data(
+        bytes(pixels),
+        tinted.get_colorspace(),
+        tinted.get_has_alpha(),
+        tinted.get_bits_per_sample(),
+        width,
+        height,
+        rowstride,
+    )
+
+
+def _pixbuf_from_surface(surface):
+    data = io.BytesIO()
+    surface.write_to_png(data)
+    loader = GdkPixbuf.PixbufLoader.new_with_type("png")
+    loader.write(data.getvalue())
+    loader.close()
+    return loader.get_pixbuf()
+
+
+def _fixed_icon(draw, size=16):
+    """固定逻辑像素。主题图标是 16px，自定义图再按倍率出就会比旁边大一倍。"""
+    canvas = max(1, int(size))
+    surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, canvas, canvas)
+    ctx = cairo.Context(surface)
+    ctx.set_line_join(cairo.LINE_JOIN_ROUND)
+    ctx.set_line_cap(cairo.LINE_CAP_ROUND)
+    ctx.set_source_rgba(0.16, 0.16, 0.18, 1)
+    draw(ctx, size)
+    return _pixbuf_from_surface(surface)
+
+
+def _symbolic_pixbuf(draw, size=16):
+    """侧栏等直接贴 pixbuf 的地方仍按逻辑尺寸出图。"""
+    scale = 4
+    canvas = max(1, int(size)) * scale
+    surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, canvas, canvas)
+    ctx = cairo.Context(surface)
+    ctx.set_line_join(cairo.LINE_JOIN_ROUND)
+    ctx.set_line_cap(cairo.LINE_CAP_ROUND)
+    ctx.set_source_rgba(0.16, 0.16, 0.18, 1)
+    ctx.scale(scale, scale)
+    draw(ctx, size)
+    large = _pixbuf_from_surface(surface)
+    if size == canvas:
+        return large
+    return large.scale_simple(int(size), int(size), GdkPixbuf.InterpType.BILINEAR)
+
+
+def comment_icon(size=16):
+    """细线圆角气泡，线宽和下载同一档，尾巴收到左下角。"""
+    def draw(ctx, size):
+        ctx.set_line_width(max(1.15, size / 14))
+        scale = size / 16
+        ctx.scale(scale, scale)
+        x, y, width, height, radius = 2.2, 2.15, 11.6, 7.7, 2.05
+        ctx.new_sub_path()
+        ctx.arc(x + width - radius, y + radius, radius, -1.5708, 0)
+        ctx.arc(x + width - radius, y + height - radius, radius, 0, 1.5708)
+        ctx.line_to(6.7, y + height)
+        ctx.line_to(4.35, 13.7)
+        ctx.line_to(5.05, y + height)
+        ctx.arc(x + radius, y + height - radius, radius, 1.5708, 3.1416)
+        ctx.arc(x + radius, y + radius, radius, 3.1416, 4.7124)
+        ctx.close_path()
+        ctx.stroke()
+
+    return _fixed_icon(draw, size)
+
+
+def heart_icon(size=16, filled=False):
+    """爱心按 16px 光学尺寸画。喜欢后填实心红，未喜欢保持细线。"""
+    def draw(ctx, size):
+        ctx.set_line_width(max(1.15, size / 14))
+        scale = size / 16
+        ctx.scale(scale, scale)
+        ctx.move_to(8.0, 13.35)
+        ctx.curve_to(7.6, 13.0, 2.05, 9.25, 2.05, 5.75)
+        ctx.curve_to(2.05, 3.7, 3.5, 2.35, 5.3, 2.35)
+        ctx.curve_to(6.5, 2.35, 7.5, 3.0, 8.0, 3.95)
+        ctx.curve_to(8.5, 3.0, 9.5, 2.35, 10.7, 2.35)
+        ctx.curve_to(12.5, 2.35, 13.95, 3.7, 13.95, 5.75)
+        ctx.curve_to(13.95, 9.25, 8.4, 13.0, 8.0, 13.35)
+        ctx.close_path()
+        if filled:
+            ctx.fill()
+        else:
+            ctx.stroke()
+
+    return _fixed_icon(draw, size)
+
+
+def note_icon(size=16):
+    """侧栏榜单用的八分音符，形状跟应用图标一致，线宽跟其他侧栏图标一致。"""
+    def draw(ctx, size):
+        ctx.set_line_width(max(1.15, size / 14))
+        scale = size / 16
+        ctx.translate(0.35 * scale, 0.15 * scale)
+        ctx.scale(scale, scale)
+        ctx.arc(5.15, 11.55, 2.05, 0, 6.2832)
+        ctx.move_to(7.2, 11.55)
+        ctx.line_to(7.2, 3.15)
+        ctx.line_to(12.55, 4.85)
+        ctx.stroke()
+
+    return _symbolic_pixbuf(draw, size)
+
+
+def app_mark(size=28):
+    """标题栏用矢量圆角红底音符。源图缩到 22px 会发虚，这里按目标尺寸重画。"""
+    canvas = max(64, int(size) * 4)
+    surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, canvas, canvas)
+    ctx = cairo.Context(surface)
+    ctx.scale(canvas / 32.0, canvas / 32.0)
+    ctx.set_source_rgba(0.925, 0.255, 0.255, 1)
+    radius = 7.2
+    ctx.arc(radius, radius, radius, 3.1416, 4.7124)
+    ctx.arc(32 - radius, radius, radius, 4.7124, 6.2832)
+    ctx.arc(32 - radius, 32 - radius, radius, 0, 1.5708)
+    ctx.arc(radius, 32 - radius, radius, 1.5708, 3.1416)
+    ctx.close_path()
+    ctx.fill()
+    ctx.set_source_rgba(1, 1, 1, 1)
+    ctx.save()
+    ctx.translate(16.0, 17.6)
+    ctx.scale(1, 0.78)
+    ctx.arc(0, 0, 4.15, 0, 6.2832)
+    ctx.restore()
+    ctx.fill()
+    ctx.set_line_width(1.85)
+    ctx.set_line_cap(cairo.LINE_CAP_BUTT)
+    ctx.move_to(19.55, 16.2)
+    ctx.line_to(19.55, 6.55)
+    ctx.stroke()
+    ctx.move_to(19.55, 7.15)
+    ctx.line_to(25.35, 9.55)
+    ctx.line_to(25.35, 11.35)
+    ctx.line_to(19.55, 8.95)
+    ctx.close_path()
+    ctx.fill()
+    large = _pixbuf_from_surface(surface)
+    return large.scale_simple(int(size), int(size), GdkPixbuf.InterpType.BILINEAR)
+
+
+def fm_icon():
+    """私人 FM 用字样，不用带斜杠的禁止图标。"""
+    size = 16
+    surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, size, size)
+    ctx = cairo.Context(surface)
+    ctx.select_font_face("Noto Sans CJK SC", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
+    ctx.set_font_size(7.2)
+    ctx.set_source_rgba(0.42, 0.42, 0.45, 1)
+    for text, y in (("F", 7.1), ("M", 14.2)):
+        extents = ctx.text_extents(text)
+        ctx.move_to((size - extents.width) / 2 - extents.x_bearing, y)
+        ctx.show_text(text)
+    data = io.BytesIO()
+    surface.write_to_png(data)
+    loader = GdkPixbuf.PixbufLoader.new_with_type("png")
+    loader.write(data.getvalue())
+    loader.close()
+    return loader.get_pixbuf()
+
+
 def fmt_time(ms):
     ms = max(0, int(ms or 0))
     seconds = ms // 1000
@@ -302,6 +627,16 @@ def fmt_comment_time(ms):
     return time.strftime("%Y年%m月%d日", time.localtime(stamp))
 
 
+def _https_media_url(url):
+    """封面和音频只从网易云音乐的地址下载，拒绝本地路径和其他站点。"""
+    parsed = urllib.parse.urlparse(str(url or ""))
+    host = parsed.hostname or ""
+    allowed = host == "music.163.com" or host.endswith(".music.163.com") or host.endswith(".126.net")
+    if parsed.scheme not in ("http", "https") or not allowed:
+        raise OSError("封面地址不在网易云音乐")
+    return urllib.parse.urlunparse(parsed._replace(scheme="https"))
+
+
 def cover_cache_path(url, size):
     """封面缓存在当前用户的隐藏目录里，文件名不随进程变化。"""
     os.makedirs(COVER_DIR, exist_ok=True)
@@ -309,11 +644,12 @@ def cover_cache_path(url, size):
     return os.path.join(COVER_DIR, f"{digest}-{int(size)}.jpg")
 
 
-def load_pixbuf(url, size, rounded=8):
+def load_pixbuf(url, size, rounded=8, refresh=False):
     path = cover_cache_path(url, size)
-    if not os.path.exists(path) or os.path.getsize(path) < 32:
+    stale = refresh and os.path.exists(path) and time.time() - os.path.getmtime(path) > 6 * 3600
+    if stale or not os.path.exists(path) or os.path.getsize(path) < 32:
         req = urllib.request.Request(
-            url + f"?param={size * 2}y{size * 2}",
+            _https_media_url(url) + f"?param={size * 2}y{size * 2}",
             headers={"User-Agent": api.UA, "Referer": "https://music.163.com/"},
         )
         with urllib.request.urlopen(req, timeout=15) as resp:
@@ -324,27 +660,16 @@ def load_pixbuf(url, size, rounded=8):
         with open(tmp, "wb") as handle:
             handle.write(data)
         os.replace(tmp, path)
-    pix = GdkPixbuf.Pixbuf.new_from_file_at_scale(path, size, size, False)
-    if rounded:
-        return circle_pixbuf(pix)
-    return pix
-
-
-def circle_pixbuf(src):
-    size = src.get_width()
-    surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, size, size)
-    ctx = cairo.Context(surface)
-    ctx.arc(size / 2, size / 2, size / 2, 0, 6.2832)
-    ctx.clip()
-    Gdk.cairo_set_source_pixbuf(ctx, src, 0, 0)
-    ctx.paint()
-    return Gdk.pixbuf_get_from_surface(surface, 0, 0, size, size)
+    return GdkPixbuf.Pixbuf.new_from_file_at_scale(path, size, size, False)
 
 
 class Player:
     def __init__(self, on_end):
         self.playbin = Gst.ElementFactory.make("playbin", "netease")
         self.on_end = on_end
+        self.cached_pos = 0
+        self.cached_dur = 0
+        self._querying = False
         bus = self.playbin.get_bus()
         bus.add_signal_watch()
         bus.connect("message", self._on_message)
@@ -357,6 +682,14 @@ class Player:
             GLib.idle_add(self.on_end, str(err))
 
     def play(self, url):
+        parsed = urllib.parse.urlparse(str(url or ""))
+        host = parsed.hostname or ""
+        remote = parsed.scheme == "https" and (
+            host == "music.163.com" or host.endswith(".music.163.com") or host.endswith(".126.net")
+        )
+        local = parsed.scheme == "file" and os.path.isfile(urllib.request.url2pathname(parsed.path))
+        if not remote and not local:
+            raise OSError("播放地址不被允许")
         self.playbin.set_state(Gst.State.NULL)
         self.playbin.set_property("uri", url)
         self.playbin.set_state(Gst.State.PLAYING)
@@ -379,18 +712,53 @@ class Player:
         return state == Gst.State.PAUSED
 
     def position_ms(self):
-        ok, pos = self.playbin.query_position(Gst.Format.TIME)
-        return int(pos / 1_000_000) if ok else 0
+        return self.cached_pos
 
     def duration_ms(self):
-        ok, dur = self.playbin.query_duration(Gst.Format.TIME)
-        return int(dur / 1_000_000) if ok else 0
+        return self.cached_dur
+
+    def refresh_clock(self):
+        # 查询必须离开界面线程。跳转时管道会短暂停住，在界面线程里查会把窗口卡死。
+        if self._querying:
+            return
+        self._querying = True
+
+        def work():
+            pos = dur = 0
+            try:
+                ok, value = self.playbin.query_position(Gst.Format.TIME)
+                if ok:
+                    pos = int(value / 1_000_000)
+                ok, value = self.playbin.query_duration(Gst.Format.TIME)
+                if ok:
+                    dur = int(value / 1_000_000)
+            except Exception:
+                pass
+            GLib.idle_add(self._store_clock, pos, dur)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _store_clock(self, pos, dur):
+        # 跳转清空管道时，位置会先报 0。这一小段仍显示点击的位置。
+        recent = time.time() - getattr(self, "_seek_stamp", 0) < 1.2
+        target = getattr(self, "_seek_target", 0)
+        if recent and pos < 800 and target > 1500:
+            pos = self.cached_pos
+        self.cached_pos = pos
+        if dur:
+            self.cached_dur = dur
+        self._querying = False
+        return False
 
     def seek_ms(self, ms):
+        target = int(max(0, ms))
+        self.cached_pos = target
+        self._seek_target = target
+        self._seek_stamp = time.time()
         self.playbin.seek_simple(
             Gst.Format.TIME,
             Gst.SeekFlags.FLUSH | Gst.SeekFlags.KEY_UNIT,
-            int(ms) * Gst.MSECOND,
+            target * Gst.MSECOND,
         )
 
     def set_volume(self, value):
@@ -400,9 +768,11 @@ class Player:
 class AppWindow(Gtk.ApplicationWindow):
     def __init__(self, app):
         super().__init__(application=app, title="网易云音乐")
-        self.set_default_size(1000, 646)
+        # 和启动器的 StartupWMClass 一致，任务栏才能配上同一张图标。
+        self.set_wmclass(APP_ID, APP_ID)
+        self.set_default_size(1080, 680)
         self._restore_window()
-        if os.path.exists(ICON) and not ICON.endswith("-generic"):
+        if ICON:
             try:
                 self.set_icon_from_file(ICON)
             except GLib.Error:
@@ -421,6 +791,8 @@ class AppWindow(Gtk.ApplicationWindow):
         self.play_mode = self._load_mode()
         self.lyrics = []
         self.current_song = None
+        self._resume_at = 0
+        self._resume_used = False
         self.quality = self._load_quality()
         self._applied_quality = self.quality
         self.seeking = False
@@ -431,6 +803,7 @@ class AppWindow(Gtk.ApplicationWindow):
         self._build()
         self._build_tray()
         self.liked_ids = set()
+        self.playlist_tracks = {}
         self.comment_offset = 0
         self.comment_song = None
         self.downloads = []
@@ -444,8 +817,9 @@ class AppWindow(Gtk.ApplicationWindow):
             self._status("快捷键已生效：Ctrl+Alt+P 播放或暂停，Ctrl+Alt+Home 上一首，Ctrl+Alt+End 下一首")
         self.connect("delete-event", self._on_close)
         self.connect("key-press-event", self._on_key)
+        self.connect("button-press-event", self._on_window_press)
         self.connect("configure-event", self._remember_window)
-        GLib.timeout_add(400, self._tick)
+        GLib.timeout_add(500, self._tick)
         self.show_all()
         self.stack.set_visible_child_name("home")
         self._status("正在加载推荐…")
@@ -479,6 +853,15 @@ class AppWindow(Gtk.ApplicationWindow):
         header.set_show_close_button(True)
         header.set_title("网易云音乐")
         self.set_titlebar(header)
+        brand = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        mark = Gtk.Image()
+        mark.set_from_pixbuf(app_mark(32))
+        mark.set_pixel_size(22)
+        name = Gtk.Label(label="网易云音乐（非官方）", xalign=0)
+        name.get_style_context().add_class("brand")
+        brand.pack_start(mark, False, False, 0)
+        brand.pack_start(name, False, False, 0)
+        header.pack_start(brand)
         self.search = Gtk.SearchEntry()
         self.search.set_placeholder_text("搜索歌曲、歌手")
         self.search.set_width_chars(28)
@@ -493,18 +876,8 @@ class AppWindow(Gtk.ApplicationWindow):
         self.side = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         self.side.get_style_context().add_class("side")
         self.side.set_size_request(210, -1)
-        brand = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        brand.set_margin_start(16)
-        brand.set_margin_top(14)
-        brand.set_margin_bottom(10)
-        mark = Gtk.Label(label="♪")
-        mark.get_style_context().add_class("brand")
-        name = Gtk.Label(label="网易云音乐", xalign=0)
-        name.get_style_context().add_class("brand")
-        brand.pack_start(mark, False, False, 0)
-        brand.pack_start(name, False, False, 0)
-        self.side.pack_start(brand, False, False, 0)
         self.nav_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
+        self.nav_box.set_margin_top(8)
         scroll = Gtk.ScrolledWindow()
         scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         scroll.add(self.nav_box)
@@ -523,27 +896,79 @@ class AppWindow(Gtk.ApplicationWindow):
         self.heading.get_style_context().add_class("heading")
         self.heading.set_margin_start(16)
         self.heading.set_margin_top(12)
-        self.store = Gtk.ListStore(str, str, str, str, str, object, GdkPixbuf.Pixbuf)
+        # 0 序号  1 标题  2 歌手  3 专辑  4 时长  5 数据  6 封面  7 VIP
+        self.store = Gtk.ListStore(str, str, str, str, str, object, GdkPixbuf.Pixbuf, str)
         self.view = Gtk.TreeView(model=self.store, headers_visible=True)
         self.view.set_fixed_height_mode(False)
         self.view.set_activate_on_single_click(False)
+        self.view.set_enable_search(False)
         self.view.connect("row-activated", self._on_activate)
         self.view.connect("button-press-event", self._on_list_press)
+        self.view.connect("motion-notify-event", self._on_list_motion)
+        self.view.connect("leave-notify-event", self._on_list_leave)
+        self.view.add_events(Gdk.EventMask.POINTER_MOTION_MASK | Gdk.EventMask.LEAVE_NOTIFY_MASK)
         song_scroll = Gtk.ScrolledWindow()
         song_scroll.get_style_context().add_class("song-list")
-        song_scroll.get_vadjustment().connect("value-changed", lambda *_: self._fill_visible_covers())
+        song_scroll.get_vadjustment().connect("value-changed", lambda *_: self._schedule_covers())
+
+        index_cell = Gtk.CellRendererText(xalign=1)
+        index_cell.set_padding(8, 8)
+        index_col = Gtk.TreeViewColumn("#", index_cell, text=0)
+        index_col.set_min_width(46)
+        index_col.set_sizing(Gtk.TreeViewColumnSizing.FIXED)
+        index_col.set_fixed_width(52)
+        index_col.set_cell_data_func(index_cell, self._paint_index)
+        self.view.append_column(index_col)
+
         cover_cell = Gtk.CellRendererPixbuf()
-        cover_col = Gtk.TreeViewColumn("", cover_cell, pixbuf=6)
-        cover_col.set_min_width(44)
-        self.view.append_column(cover_col)
-        for idx, title, width in ((1, "歌曲", 168), (2, "歌手", 160), (3, "专辑", 160), (4, "时长", 64)):
-            renderer = Gtk.CellRendererText(ellipsize=3)
-            column = Gtk.TreeViewColumn(title, renderer, text=idx)
-            column.set_resizable(True)
-            column.set_min_width(width)
-            column.set_expand(idx == 1)
-            self.view.append_column(column)
+        cover_cell.set_padding(4, 6)
+        title_cell = Gtk.CellRendererText(ellipsize=3)
+        title_cell.set_padding(6, 0)
+        vip_cell = Gtk.CellRendererText()
+        vip_cell.set_padding(4, 0)
+        artist_cell = Gtk.CellRendererText(ellipsize=3)
+        artist_cell.set_padding(8, 0)
+        title_col = Gtk.TreeViewColumn("标题")
+        title_col.pack_start(cover_cell, False)
+        title_col.pack_start(title_cell, True)
+        title_col.pack_start(vip_cell, False)
+        title_col.pack_start(artist_cell, False)
+        title_col.add_attribute(cover_cell, "pixbuf", 6)
+        title_col.add_attribute(title_cell, "text", 1)
+        title_col.add_attribute(vip_cell, "text", 7)
+        title_col.add_attribute(artist_cell, "text", 2)
+        # 标题不再吃掉剩余宽度。收掉大约一成，专辑和时长才能靠左，滚动条也不压字。
+        title_col.set_expand(False)
+        title_col.set_min_width(220)
+        title_col.set_sizing(Gtk.TreeViewColumnSizing.FIXED)
+        title_col.set_fixed_width(360)
+        title_col.set_resizable(True)
+        self.view.append_column(title_col)
+        title_col.set_cell_data_func(title_cell, self._paint_title)
+        title_col.set_cell_data_func(vip_cell, self._paint_vip)
+        title_col.set_cell_data_func(artist_cell, self._paint_artist)
+
+        album_cell = Gtk.CellRendererText(ellipsize=3, xalign=0)
+        album_col = Gtk.TreeViewColumn("专辑", album_cell, text=3)
+        album_col.set_min_width(120)
+        album_col.set_sizing(Gtk.TreeViewColumnSizing.FIXED)
+        album_col.set_fixed_width(168)
+        album_col.set_resizable(True)
+        album_col.set_cell_data_func(album_cell, self._paint_meta)
+        self.view.append_column(album_col)
+        duration_cell = Gtk.CellRendererText(xalign=0)
+        duration_cell.set_padding(6, 0)
+        duration_col = Gtk.TreeViewColumn("时长", duration_cell, text=4)
+        duration_col.set_min_width(72)
+        duration_col.set_sizing(Gtk.TreeViewColumnSizing.FIXED)
+        duration_col.set_fixed_width(86)
+        duration_col.set_alignment(0)
+        duration_col.set_cell_data_func(duration_cell, self._paint_meta)
+        self.view.append_column(duration_col)
         song_scroll.add(self.view)
+        self.title_col = title_col
+        self.album_col = album_col
+        song_scroll.connect("size-allocate", self._fit_song_columns)
         self.song_scroll = song_scroll
         self.list_page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         self.list_page.pack_start(self.heading, False, False, 0)
@@ -552,21 +977,25 @@ class AppWindow(Gtk.ApplicationWindow):
         self.lyric_buf = Gtk.TextBuffer()
         self.lyric_view = Gtk.TextView(buffer=self.lyric_buf, editable=False, cursor_visible=False, wrap_mode=Gtk.WrapMode.WORD)
         self.lyric_view.set_justification(Gtk.Justification.CENTER)
-        self.lyric_view.set_left_margin(80)
-        self.lyric_view.set_right_margin(80)
-        self.lyric_view.set_top_margin(28)
-        self.lyric_view.set_pixels_above_lines(12)
+        self.lyric_view.set_left_margin(120)
+        self.lyric_view.set_right_margin(120)
+        self.lyric_view.set_pixels_above_lines(10)
+        self.lyric_view.set_pixels_below_lines(10)
         self.lyric_view.connect("button-press-event", self._lyric_click)
         self.lyric_title = Gtk.Label(xalign=0.5)
-        self.lyric_title.get_style_context().add_class("heading")
+        self.lyric_title.set_margin_top(18)
+        self.lyric_title.get_style_context().add_class("lyric-song")
         self.lyric_artist = Gtk.Label()
-        self.lyric_artist.get_style_context().add_class("dim")
-        back = Gtk.Button(label="返回")
-        back.get_style_context().add_class("flat")
-        back.connect("clicked", lambda *_: self._show_lyric(False))
+        self.lyric_artist.set_margin_bottom(8)
+        self.lyric_artist.get_style_context().add_class("lyric-artist")
+        back = self._icon_button("go-previous-symbolic", lambda: self._show_lyric(False), "back-btn")
+        back.set_tooltip_text("返回")
         lyric_bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
-        lyric_bar.pack_start(back, False, False, 8)
+        lyric_bar.set_margin_top(8)
+        lyric_bar.set_margin_start(10)
+        lyric_bar.pack_start(back, False, False, 0)
         lyric_scroll = Gtk.ScrolledWindow()
+        lyric_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         lyric_scroll.add(self.lyric_view)
         self.lyric_page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         self.lyric_page.get_style_context().add_class("lyric-page")
@@ -588,7 +1017,13 @@ class AppWindow(Gtk.ApplicationWindow):
 
         overlay = Gtk.Overlay()
         overlay.add(self.stack)
-        overlay.add_overlay(self.queue_overlay)
+        # 打开时铺满内容区，挡住下面的列表。点在面板外就收起，点在面板上仍可选歌。
+        self.queue_catcher = Gtk.EventBox()
+        self.queue_catcher.set_visible_window(False)
+        self.queue_catcher.add(self.queue_overlay)
+        self.queue_catcher.connect("button-press-event", self._on_overlay_press)
+        overlay.add_overlay(self.queue_catcher)
+        self.queue_catcher.hide()
 
         body = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
         body.pack_start(self.side, False, False, 0)
@@ -601,17 +1036,33 @@ class AppWindow(Gtk.ApplicationWindow):
         self.cover_btn.set_tooltip_text("查看歌词")
         self.cover_btn.add(self.cover)
         self.cover_btn.connect("clicked", lambda *_: self._show_lyric(True))
-        self.title_btn = Gtk.Button(label="未在播放")
-        self.title_btn.get_style_context().add_class("flat")
-        self.title_btn.set_halign(Gtk.Align.START)
-        self.title_btn.connect("clicked", lambda *_: self._show_lyric(True))
-        self.artist_label = Gtk.Label(label="点封面查看歌词", xalign=0)
+        self.title_btn = Gtk.Label(label="未在播放", xalign=0)
+        self.title_btn.set_ellipsize(3)
+        self.title_btn.get_style_context().add_class("bar-title")
+        title_click = Gtk.EventBox()
+        title_click.add(self.title_btn)
+        title_click.connect("button-press-event", lambda *_: self._show_lyric(True))
+        self.artist_label = Gtk.Label(label="未知歌手", xalign=0)
         self.artist_label.set_ellipsize(3)
-        self.artist_label.get_style_context().add_class("dim")
-        meta = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        meta.set_size_request(180, -1)
-        meta.pack_start(self.title_btn, False, False, 0)
-        meta.pack_start(self.artist_label, False, False, 0)
+        self.artist_label.set_max_width_chars(12)
+        self.artist_label.get_style_context().add_class("bar-artist")
+        names = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        names.pack_start(title_click, False, False, 0)
+        names.pack_start(self.artist_label, False, False, 0)
+        self.like_btn = self._icon_button(heart_icon(16), self._toggle_like, "icon-btn")
+        self.like_btn.set_tooltip_text("加入或移出我喜欢的音乐")
+        self.comment_btn = self._icon_button(comment_icon(16), lambda: self._open_comments(), "icon-btn")
+        self.comment_btn.set_tooltip_text("查看评论")
+        self.download_btn = self._icon_button("folder-download-symbolic", lambda: self._enqueue_download(self.current_song), "icon-btn")
+        self.download_btn.set_tooltip_text("按当前音质下载")
+        song_actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        song_actions.pack_start(self.comment_btn, False, False, 0)
+        song_actions.pack_start(self.like_btn, False, False, 0)
+        song_actions.pack_start(self.download_btn, False, False, 0)
+        meta = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        meta.set_size_request(168, -1)
+        meta.pack_start(names, False, False, 0)
+        meta.pack_start(song_actions, False, False, 0)
 
         self.play_btn = Gtk.Button()
         self.play_btn.get_style_context().add_class("play-main")
@@ -624,87 +1075,67 @@ class AppWindow(Gtk.ApplicationWindow):
         self.scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 1000, 1)
         self.scale.set_draw_value(False)
         self.scale.set_hexpand(True)
-        self.scale.set_size_request(1, 18)
+        self.scale.set_size_request(80, 18)
         self.scale.set_valign(Gtk.Align.CENTER)
-        self.scale.set_tooltip_text("拖动进度条可以跳转")
-        self.scale.connect("button-press-event", self._seek_press)
-        self.scale.connect("button-release-event", self._seek_end)
-        self.scale.connect("motion-notify-event", self._seek_motion)
+        self.scale.set_can_focus(False)
+        self.scale.set_tooltip_text("点击或拖动进度条跳转")
+        self.scale.connect("change-value", self._seek_change)
+        self.scale.connect("button-release-event", self._seek_release)
         self.time_label = Gtk.Label(label="00:00 / 00:00")
         self.time_label.get_style_context().add_class("dim")
-        self.mode_btn = Gtk.Button()
-        self.mode_btn.get_style_context().add_class("bar-btn")
-        self.mode_btn.set_relief(Gtk.ReliefStyle.NONE)
-        self.mode_btn.connect("clicked", lambda *_: self._cycle_mode())
+        self.mode_btn = self._icon_button("media-playlist-repeat-symbolic", self._cycle_mode, "icon-btn")
         self._apply_mode_button()
-        self.like_btn = Gtk.Button(label="喜欢")
-        self.like_btn.get_style_context().add_class("bar-btn")
-        self.like_btn.set_relief(Gtk.ReliefStyle.NONE)
-        self.like_btn.set_tooltip_text("加入或移出我喜欢的音乐")
-        self.like_btn.connect("clicked", lambda *_: self._toggle_like())
-        self.comment_btn = Gtk.Button(label="评论")
-        self.comment_btn.get_style_context().add_class("bar-btn")
-        self.comment_btn.set_relief(Gtk.ReliefStyle.NONE)
-        self.comment_btn.set_tooltip_text("查看评论")
-        self.comment_btn.connect("clicked", lambda *_: self._open_comments())
-        self.download_btn = Gtk.Button(label="下载")
-        self.download_btn.get_style_context().add_class("bar-btn")
-        self.download_btn.set_relief(Gtk.ReliefStyle.NONE)
-        self.download_btn.set_tooltip_text("下载当前歌曲")
-        self.download_btn.connect("clicked", lambda *_: self._enqueue_download(self.current_song))
-        self.queue_btn = Gtk.Button(label="播放列表")
-        self.queue_btn.get_style_context().add_class("bar-btn")
-        self.queue_btn.set_relief(Gtk.ReliefStyle.NONE)
-        self.queue_btn.set_tooltip_text("查看当前播放列表")
-        self.queue_btn.connect("clicked", lambda *_: self._show_queue())
+        self.queue_btn = self._icon_button("view-list-symbolic", self._show_queue, "icon-btn")
+        self.queue_btn.set_tooltip_text("播放列表")
         self.quality_btn = Gtk.MenuButton(label=self._quality_short())
-        self.quality_btn.get_style_context().add_class("bar-btn")
+        self.quality_btn.get_style_context().add_class("quality-btn")
+        self.quality_btn.set_relief(Gtk.ReliefStyle.NONE)
         self.quality_btn.set_tooltip_text("播放音质")
 
-        controls = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
-        controls.set_halign(Gtk.Align.CENTER)
-        controls.pack_start(self._icon_button("media-skip-backward-symbolic", self._prev), False, False, 0)
-        controls.pack_start(self.play_btn, False, False, 0)
-        controls.pack_start(self._icon_button("media-skip-forward-symbolic", self._next), False, False, 0)
+        self.prev_btn = self._icon_button("media-skip-backward-symbolic", self._prev, "transport")
+        self.next_btn = self._icon_button("media-skip-forward-symbolic", self._next, "transport")
+        self.prev_btn.set_tooltip_text("上一首")
+        self.next_btn.set_tooltip_text("下一首")
 
-        self.volume_icon = Gtk.Image.new_from_icon_name("audio-volume-high-symbolic", Gtk.IconSize.BUTTON)
-        self.volume_icon.set_tooltip_text("音量")
-        self.volume = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 1, 0.01)
+        self.volume_btn = self._icon_button("audio-volume-high-symbolic", self._toggle_volume, "icon-btn")
+        self.volume_btn.set_tooltip_text("音量")
+        self.volume = Gtk.Scale.new_with_range(Gtk.Orientation.VERTICAL, 0, 1, 0.01)
+        self.volume.set_inverted(True)
         self.volume.set_draw_value(False)
-        self.volume.set_size_request(88, 16)
+        self.volume.set_size_request(28, 110)
         self.volume.set_value(self._load_volume())
-        self.volume.set_tooltip_text("音量")
         self.volume.connect("value-changed", self._on_volume)
         self.player.set_volume(self.volume.get_value())
-        volume_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
-        volume_box.set_valign(Gtk.Align.CENTER)
-        volume_box.pack_start(self.volume_icon, False, False, 0)
-        volume_box.pack_start(self.volume, False, False, 0)
+        self._sync_volume_icon(self.volume.get_value())
+        volume_pop = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        volume_pop.set_margin_top(8)
+        volume_pop.set_margin_bottom(8)
+        volume_pop.set_margin_start(6)
+        volume_pop.set_margin_end(6)
+        volume_pop.pack_start(self.volume, True, True, 0)
+        volume_pop.show_all()
+        self.volume_popup = Gtk.Popover()
+        self.volume_popup.add(volume_pop)
+        self.volume_popup.set_relative_to(self.volume_btn)
+        self.volume_popup.set_position(Gtk.PositionType.TOP)
 
         progress = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         progress.get_style_context().add_class("progress-row")
         progress.pack_start(self.scale, True, True, 0)
         progress.pack_start(self.time_label, False, False, 0)
-        progress.pack_start(volume_box, False, False, 6)
 
-        actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        actions.set_halign(Gtk.Align.CENTER)
-        actions.pack_start(self.quality_btn, False, False, 0)
-        actions.pack_start(self.mode_btn, False, False, 0)
-        actions.pack_start(self.like_btn, False, False, 0)
-        actions.pack_start(self.comment_btn, False, False, 0)
-        actions.pack_start(self.download_btn, False, False, 0)
-        actions.pack_start(self.queue_btn, False, False, 0)
-
-        bar = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         bar.get_style_context().add_class("player-bar")
-        top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        top.pack_start(self.cover_btn, False, False, 0)
-        top.pack_start(meta, False, False, 0)
-        top.pack_start(progress, True, True, 8)
-        bar.pack_start(top, False, False, 0)
-        bar.pack_start(controls, False, False, 0)
-        bar.pack_start(actions, False, False, 0)
+        bar.pack_start(self.prev_btn, False, False, 0)
+        bar.pack_start(self.play_btn, False, False, 0)
+        bar.pack_start(self.next_btn, False, False, 0)
+        bar.pack_start(self.cover_btn, False, False, 4)
+        bar.pack_start(meta, False, False, 0)
+        bar.pack_start(progress, True, True, 6)
+        bar.pack_end(self.quality_btn, False, False, 0)
+        bar.pack_end(self.queue_btn, False, False, 0)
+        bar.pack_end(self.mode_btn, False, False, 0)
+        bar.pack_end(self.volume_btn, False, False, 0)
 
         self.status = Gtk.Label(label="", xalign=0)
         self.status.set_margin_start(16)
@@ -752,6 +1183,24 @@ class AppWindow(Gtk.ApplicationWindow):
             return False
         return False
 
+    def _on_window_press(self, _win, event):
+        # 播放列表浮在内容区上。点侧栏、播放条或标题栏时，内容区收不到这次点击。
+        if self.queue_overlay is None or not self.queue_overlay.get_reveal_child():
+            return False
+        panel = self.queue_overlay.get_child()
+        if panel is None or not panel.get_window():
+            return False
+        x, y = event.x_root, event.y_root
+        origin = panel.get_window().get_root_coords(0, 0)
+        if origin is None:
+            return False
+        px, py = origin
+        width, height = panel.get_allocated_width(), panel.get_allocated_height()
+        if px <= x <= px + width and py <= y <= py + height:
+            return False
+        self._hide_queue()
+        return False
+
     def _load_volume(self):
         try:
             return max(0.0, min(1.0, float(open(VOLUME_PATH, encoding="utf-8").read().strip())))
@@ -760,13 +1209,7 @@ class AppWindow(Gtk.ApplicationWindow):
 
     def _on_volume(self, _scale, value):
         self.player.set_volume(value)
-        icon = "audio-volume-muted-symbolic" if value < 0.01 else (
-            "audio-volume-low-symbolic" if value < 0.34 else
-            "audio-volume-medium-symbolic" if value < 0.67 else
-            "audio-volume-high-symbolic"
-        )
-        if hasattr(self, "volume_icon"):
-            self.volume_icon.set_from_icon_name(icon, Gtk.IconSize.BUTTON)
+        self._sync_volume_icon(value)
         try:
             os.makedirs(DATA_DIR, exist_ok=True)
             with open(VOLUME_PATH, "w", encoding="utf-8") as handle:
@@ -777,7 +1220,12 @@ class AppWindow(Gtk.ApplicationWindow):
     def _restore_window(self):
         try:
             data = json.loads(open(WINDOW_PATH, encoding="utf-8").read())
-            self.set_default_size(int(data.get("w") or 1000), int(data.get("h") or 646))
+            width = int(data.get("w") or 1080)
+            height = int(data.get("h") or 680)
+            # 截图和调试窗口写过偏矮的尺寸，那种不拿来当默认高度。
+            if height < 560:
+                height = 680
+            self.set_default_size(max(860, width), height)
             if data.get("x") is not None:
                 self.move(int(data["x"]), int(data["y"]))
         except (OSError, ValueError, TypeError):
@@ -825,8 +1273,172 @@ class AppWindow(Gtk.ApplicationWindow):
             item = Gtk.MenuItem(label=label)
             item.connect("activate", lambda _item, fn=handler: fn())
             menu.append(item)
+        collect = Gtk.MenuItem(label="收藏到歌单")
+        collect.set_submenu(self._playlist_submenu(song))
+        menu.append(collect)
+        browsing = getattr(self, "_browsing_playlist", None)
+        if browsing and self._can_remove_from_open(browsing):
+            name = self.heading.get_text() or "当前歌单"
+            remove_collect = Gtk.MenuItem(label=f"从「{name}」移除")
+            remove_collect.connect(
+                "activate",
+                lambda *_: self._remove_from(song, browsing, name),
+            )
+            menu.append(remove_collect)
+        if 0 <= index < len(self.playing) and self.playing[index] is song:
+            remove = Gtk.MenuItem(label="从播放列表移除")
+            remove.connect("activate", lambda *_: self._remove_playing_at(index))
+            menu.append(remove)
         menu.show_all()
         return menu
+
+    def _remove_playing_at(self, index):
+        if index < 0 or index >= len(self.playing):
+            return
+        current = self.playing_index == index
+        del self.playing[index]
+        if index < self.playing_index:
+            self.playing_index -= 1
+        self._refresh_queue_popup()
+        if current:
+            if not self.playing:
+                self.player.stop()
+                self.current_song = None
+                return
+            self._play_from_playing(min(index, len(self.playing) - 1))
+
+    def _created_playlists(self):
+        uid = (self.profile or {}).get("userId")
+        return [
+            item for item in self.mine
+            if item.get("special") != 5 and "喜欢的音乐" not in (item.get("name") or "")
+            and (not uid or str(item.get("creator")) == str(uid))
+        ]
+
+    def _playlist_submenu(self, song):
+        menu = Gtk.Menu()
+        created = self._created_playlists()
+        if not self.cookie:
+            empty = Gtk.MenuItem(label="请先登录")
+            empty.set_sensitive(False)
+            menu.append(empty)
+            return menu
+        if not created:
+            empty = Gtk.MenuItem(label="还没有自建歌单")
+            empty.set_sensitive(False)
+            menu.append(empty)
+            return menu
+        for playlist in created:
+            item = Gtk.MenuItem(label=playlist.get("name") or "歌单")
+            item.connect(
+                "activate",
+                lambda _item, pid=playlist.get("id"), name=playlist.get("name"): self._collect_to(song, pid, name),
+            )
+            menu.append(item)
+        return menu
+
+    def _can_remove_from_open(self, playlist_id):
+        """只有当前打开的自建歌单才提供移除，不展开二级菜单。"""
+        if not self.cookie or not playlist_id:
+            return False
+        return any(str(item.get("id")) == str(playlist_id) for item in self._created_playlists())
+
+    def _collect_to(self, song, playlist_id, name):
+        if not song or not song.get("id") or not playlist_id:
+            return
+        self._status(f"正在加入「{name}」…")
+        self._bg(lambda: self._collect_track(song, playlist_id, name))
+
+    def _collect_track(self, song, playlist_id, name):
+        try:
+            api.add_playlist_track(playlist_id, song["id"], self.cookie)
+        except api.ApiError as exc:
+            GLib.idle_add(self._status, str(exc))
+            return
+        self._remember_playlist_track(playlist_id, song["id"], True)
+        GLib.idle_add(self._status, f"已加入「{name}」：{song.get('name') or ''}")
+        if self._viewing_playlist(playlist_id):
+            GLib.idle_add(self._insert_song_row, song)
+
+    def _remove_from(self, song, playlist_id, name):
+        if not song or not song.get("id") or not playlist_id:
+            return
+        self._status(f"正在从「{name}」移除…")
+        self._bg(lambda: self._remove_track(song, playlist_id, name))
+
+    def _remove_track(self, song, playlist_id, name):
+        try:
+            api.remove_playlist_track(playlist_id, song["id"], self.cookie)
+        except api.ApiError as exc:
+            GLib.idle_add(self._status, str(exc))
+            return
+        self._remember_playlist_track(playlist_id, song["id"], False)
+        GLib.idle_add(self._status, f"已从「{name}」移除：{song.get('name') or ''}")
+        if getattr(self, "_browsing_playlist", None) == playlist_id:
+            GLib.idle_add(self._drop_song_row, song.get("id"))
+
+    def _remember_playlist_songs(self, playlist_id, songs):
+        known = getattr(self, "playlist_tracks", None)
+        if known is None:
+            known = {}
+            self.playlist_tracks = known
+        known[playlist_id] = {song.get("id") for song in songs if isinstance(song, dict) and song.get("id")}
+
+    def _remember_playlist_track(self, playlist_id, song_id, present):
+        known = getattr(self, "playlist_tracks", None)
+        if known is None:
+            known = {}
+            self.playlist_tracks = known
+        ids = set(known.get(playlist_id) or ())
+        if present:
+            ids.add(song_id)
+        else:
+            ids.discard(song_id)
+        known[playlist_id] = ids
+
+    def _viewing_liked(self):
+        return self.stack.get_visible_child_name() == "list" and bool(getattr(self, "_browsing_liked", False))
+
+    def _viewing_playlist(self, playlist_id):
+        if self.stack.get_visible_child_name() != "list":
+            return False
+        current = getattr(self, "_browsing_playlist", None)
+        return current is not None and str(current) == str(playlist_id)
+
+    def _insert_song_row(self, song):
+        """收藏成功后插到当前列表最前。已在列表里就不重复加。"""
+        if not isinstance(song, dict) or not song.get("id"):
+            return False
+        song_id = str(song.get("id"))
+        for row in self.store:
+            item = row[5]
+            if isinstance(item, dict) and str(item.get("id")) == song_id and item.get("artist") is not None:
+                return False
+        self.store.insert(0, [
+            "01",
+            song.get("name") or "",
+            song.get("artist") or "",
+            song.get("album") or "",
+            fmt_time(song.get("duration")),
+            song,
+            self._cover_placeholder(),
+            self._vip_mark(song),
+        ])
+        self._renumber_rows()
+        self._schedule_covers()
+        return False
+
+    def _drop_song_row(self, song_id):
+        for row in list(self.store):
+            song = row[5]
+            if isinstance(song, dict) and str(song.get("id")) == str(song_id):
+                self.store.remove(row.iter)
+        self._renumber_rows()
+        return False
+
+    def _renumber_rows(self):
+        for index, row in enumerate(self.store, start=1):
+            row[0] = f"{index:02d}"
 
     def _play_next(self, song):
         if not self.playing:
@@ -846,7 +1458,7 @@ class AppWindow(Gtk.ApplicationWindow):
         if not self.cookie:
             self._status("请先登录再收藏")
             return
-        liked = song["id"] in self.liked_ids
+        liked = self._song_liked(song)
         self._bg(lambda: self._like(song, not liked))
 
     def _like(self, song, like):
@@ -861,16 +1473,60 @@ class AppWindow(Gtk.ApplicationWindow):
             self.liked_ids.discard(song["id"])
         GLib.idle_add(self._status, ("已加入我喜欢" if like else "已移出我喜欢") + f"：{song.get('name') or ''}")
         GLib.idle_add(self._refresh_like_button)
+        if self._viewing_liked():
+            GLib.idle_add(self._insert_song_row if like else self._drop_song_row, song if like else song.get("id"))
+
+    def _song_liked(self, song):
+        if not isinstance(song, dict) or not song.get("id"):
+            return False
+        return str(song.get("id")) in {str(item) for item in self.liked_ids}
 
     def _refresh_like_button(self):
         song = self.current_song or {}
-        liked = song.get("id") in self.liked_ids
-        self.like_btn.set_label("已喜欢" if liked else "喜欢")
+        liked = self._song_liked(song)
+        ctx = self.like_btn.get_style_context()
+        if liked:
+            ctx.add_class("liked")
+        else:
+            ctx.remove_class("liked")
+        image = self.like_btn.get_image()
+        if image is not None:
+            pixbuf = heart_icon(16, filled=liked)
+            if liked:
+                pixbuf = _tint_pixbuf(pixbuf, 0.925, 0.255, 0.255)
+            image.set_pixel_size(16)
+            image.set_from_pixbuf(pixbuf)
+            for state in (Gtk.StateFlags.NORMAL, Gtk.StateFlags.PRELIGHT, Gtk.StateFlags.ACTIVE):
+                image.override_color(state, None)
+        self.like_btn.set_tooltip_text("移出我喜欢的音乐" if liked else "加入我喜欢的音乐")
         return False
 
-    def _icon_button(self, name, handler):
-        button = Gtk.Button.new_from_icon_name(name, Gtk.IconSize.BUTTON)
-        button.get_style_context().add_class("flat")
+    def _toggle_volume(self):
+        if self.volume_popup.get_visible():
+            self.volume_popup.popdown()
+        else:
+            self.volume_popup.popup()
+
+    def _sync_volume_icon(self, value):
+        icon = "audio-volume-muted-symbolic" if value < 0.01 else (
+            "audio-volume-low-symbolic" if value < 0.34 else
+            "audio-volume-medium-symbolic" if value < 0.67 else
+            "audio-volume-high-symbolic"
+        )
+        image = self.volume_btn.get_image()
+        if image is not None:
+            image.set_from_icon_name(icon, Gtk.IconSize.BUTTON)
+
+    def _icon_button(self, name, handler, style="flat"):
+        if isinstance(name, str):
+            button = Gtk.Button.new_from_icon_name(name, Gtk.IconSize.BUTTON)
+        else:
+            button = Gtk.Button()
+            image = Gtk.Image.new_from_pixbuf(name)
+            image.set_pixel_size(16)
+            button.set_image(image)
+            button.set_always_show_image(True)
+        button.get_style_context().add_class(style)
         button.set_relief(Gtk.ReliefStyle.NONE)
         button.connect("clicked", lambda *_: handler())
         return button
@@ -933,7 +1589,7 @@ class AppWindow(Gtk.ApplicationWindow):
     def _seek_after_switch(self, song, resume_at, tries):
         if not self.current_song or self.current_song.get("id") != song.get("id"):
             return False
-        if self.player.duration_ms() > 0 or tries >= 8:
+        if self.player.cached_dur > 0 or tries >= 8:
             self.player.seek_ms(resume_at)
             return False
         GLib.timeout_add(200, self._seek_after_switch, song, resume_at, tries + 1)
@@ -954,18 +1610,18 @@ class AppWindow(Gtk.ApplicationWindow):
         for child in self.nav_box.get_children():
             self.nav_box.remove(child)
         self.nav_buttons = []
-        self._nav("推荐", lambda: self._show_home(), current=True)
+        self._nav("推荐", lambda: self._show_home(), current=True, icon="user-home-symbolic")
         for cid, name in api.CHARTS[:4]:
-            self._nav(name, lambda c=cid, n=name: self._open_playlist(c, n))
-        self._nav("热门歌单", self._open_discover)
+            self._nav(name, lambda c=cid, n=name: self._open_playlist(c, n), icon=note_icon())
+        self._nav("热门歌单", self._open_discover, icon="folder-music-symbolic")
         if self.profile:
             self._section(self.profile.get("vip") or "我的")
-            self._nav("我喜欢的音乐", self._open_liked)
-            self._nav("每日推荐", self._open_daily)
-            self._nav("私人FM", self._open_fm)
-            self._nav("听歌排行", self._open_record)
-            self._nav("下载管理", self._open_downloads)
-            self._nav("刷新收藏", self._refresh_library)
+            self._nav("我喜欢的音乐", self._open_liked, icon="emblem-favorite-symbolic")
+            self._nav("每日推荐", self._open_daily, icon="x-office-calendar-symbolic")
+            self._nav("私人FM", self._open_fm, icon=fm_icon())
+            self._nav("听歌排行", self._open_record, icon="utilities-system-monitor-symbolic")
+            self._nav("下载管理", self._open_downloads, icon="folder-download-symbolic")
+            self._nav("刷新收藏", self._refresh_library, icon="view-refresh-symbolic")
             created = []
             collected = []
             uid = self.profile.get("userId")
@@ -973,28 +1629,78 @@ class AppWindow(Gtk.ApplicationWindow):
                 (created if item.get("creator") == uid else collected).append(item)
             if created:
                 self._section("创建的歌单")
-                for item in sorted(created, key=lambda row: row.get("added") or 0, reverse=True)[:20]:
-                    self._nav(item["name"], lambda i=item: self._open_playlist(i["id"], i["name"], mine=True))
+                for item in self._sort_by_recent(created)[:20]:
+                    self._nav(
+                        item["name"],
+                        lambda i=item: self._open_playlist(i["id"], i["name"], mine=True),
+                        icon="folder-music-symbolic",
+                    )
             if collected:
                 self._section("收藏的歌单")
-                for item in sorted(collected, key=lambda row: row.get("added") or 0, reverse=True)[:30]:
-                    self._nav(item["name"], lambda i=item: self._open_playlist(i["id"], i["name"]))
+                for item in self._sort_by_recent(collected)[:30]:
+                    self._nav(
+                        item["name"],
+                        lambda i=item: self._open_playlist(i["id"], i["name"]),
+                        icon="folder-music-symbolic",
+                    )
         self.nav_box.show_all()
+
+    def _load_recent(self):
+        if getattr(self, "_recent_playlists", None) is not None:
+            return self._recent_playlists
+        try:
+            self._recent_playlists = json.loads(open(RECENT_PATH, encoding="utf-8").read())
+        except (OSError, ValueError):
+            self._recent_playlists = {}
+        return self._recent_playlists
+
+    def _sort_by_recent(self, items):
+        """最近播放过内容的歌单排前面，其余仍按收藏时间。"""
+        recent = self._load_recent()
+
+        def key(item):
+            stamp = recent.get(str(item.get("id"))) or 0
+            added = item.get("added") or 0
+            return (1 if stamp else 0, stamp, added)
+
+        return sorted(items, key=key, reverse=True)
+
+    def _touch_playlist(self, ident):
+        if not ident:
+            return
+        recent = self._load_recent()
+        recent[str(ident)] = int(time.time())
+        self._recent_playlists = recent
+        try:
+            os.makedirs(DATA_DIR, exist_ok=True)
+            with open(RECENT_PATH, "w", encoding="utf-8") as handle:
+                json.dump(recent, handle)
+        except OSError:
+            pass
+        self._fill_nav()
 
     def _section(self, text):
         label = Gtk.Label(label=text, xalign=0)
         label.get_style_context().add_class("section")
         self.nav_box.pack_start(label, False, False, 0)
 
-    def _nav(self, text, handler, current=False):
-        button = Gtk.Button(label=text)
+    def _nav(self, text, handler, current=False, icon="folder-music-symbolic"):
+        button = Gtk.Button()
         button.set_relief(Gtk.ReliefStyle.NONE)
         button.set_halign(Gtk.Align.FILL)
+        button.set_always_show_image(True)
         button.get_style_context().add_class("side-row")
-        child = button.get_child()
-        if isinstance(child, Gtk.Label):
-            child.set_xalign(0)
-            child.set_ellipsize(3)
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        if isinstance(icon, str):
+            image = Gtk.Image.new_from_icon_name(icon, Gtk.IconSize.BUTTON)
+        else:
+            image = Gtk.Image.new_from_pixbuf(icon)
+        image.set_pixel_size(16)
+        label = Gtk.Label(label=text, xalign=0)
+        label.set_ellipsize(3)
+        row.pack_start(image, False, False, 0)
+        row.pack_start(label, True, True, 0)
+        button.add(row)
         if current:
             button.get_style_context().add_class("current")
         button.connect("clicked", lambda *_: self._select_nav(button, handler))
@@ -1013,6 +1719,8 @@ class AppWindow(Gtk.ApplicationWindow):
             self._status("私人 FM 需要先登录")
             return
         self._hide_queue()
+        self._browsing_playlist = None
+        self._browsing_liked = False
         self.heading.set_text("私人FM")
         self._show_page("list")
         self.lyric_open = False
@@ -1039,6 +1747,8 @@ class AppWindow(Gtk.ApplicationWindow):
             self._status("听歌排行需要先登录")
             return
         self._hide_queue()
+        self._browsing_playlist = None
+        self._browsing_liked = False
         self.heading.set_text("听歌排行 · 最近一周")
         self._show_page("list")
         self._status("正在读取听歌排行…")
@@ -1060,6 +1770,7 @@ class AppWindow(Gtk.ApplicationWindow):
         self.stack.set_visible_child_name(name)
         self.stack.show_all()
         if self.queue_overlay is not None and self.queue_overlay.get_reveal_child():
+            self.queue_catcher.show()
             self.queue_overlay.show_all()
 
     def _show_home(self):
@@ -1068,6 +1779,8 @@ class AppWindow(Gtk.ApplicationWindow):
 
     def _open_playlist(self, ident, name, mine=False):
         self._hide_queue()
+        self._browsing_playlist = ident
+        self._browsing_liked = False
         self.heading.set_text(name)
         self._show_page("list")
         self.lyric_open = False
@@ -1076,6 +1789,8 @@ class AppWindow(Gtk.ApplicationWindow):
 
     def _open_discover(self):
         self._hide_queue()
+        self._browsing_playlist = None
+        self._browsing_liked = False
         self.heading.set_text("热门歌单")
         self._show_page("list")
         self._status("正在加载热门歌单…")
@@ -1083,6 +1798,11 @@ class AppWindow(Gtk.ApplicationWindow):
 
     def _open_liked(self):
         self._hide_queue()
+        self._browsing_playlist = None
+        self._browsing_liked = True
+        liked = next((item for item in self.mine if item.get("special") == 5 or "喜欢的音乐" in (item.get("name") or "")), None)
+        if liked:
+            self._browsing_playlist = liked.get("id")
         self.heading.set_text("我喜欢的音乐")
         self._show_page("list")
         self._status("正在同步我喜欢的音乐…")
@@ -1090,6 +1810,8 @@ class AppWindow(Gtk.ApplicationWindow):
 
     def _open_daily(self):
         self._hide_queue()
+        self._browsing_playlist = None
+        self._browsing_liked = False
         self.heading.set_text("每日推荐")
         self._show_page("list")
         self._bg(self._show_daily)
@@ -1103,6 +1825,8 @@ class AppWindow(Gtk.ApplicationWindow):
         if not keyword:
             return
         self._hide_queue()
+        self._browsing_playlist = None
+        self._browsing_liked = False
         self.heading.set_text(f"搜索「{keyword}」")
         self._show_page("list")
         self._status("正在搜索…")
@@ -1114,7 +1838,10 @@ class AppWindow(Gtk.ApplicationWindow):
 
     def _show_playlist(self, ident, name, mine=False):
         data = api.playlist_tracks(ident, cookie=self.cookie, by_added=mine)
+        if mine:
+            self._remember_playlist_songs(ident, data.get("songs") or [])
         liked = mine or data.get("special") == 5 or "喜欢的音乐" in (data.get("name") or name)
+        self._browsing_liked = bool(liked)
         if liked and not mine:
             data["songs"].sort(key=lambda song: song.get("added") or 0, reverse=True)
         GLib.idle_add(self.heading.set_text, data["name"] or name)
@@ -1144,24 +1871,43 @@ class AppWindow(Gtk.ApplicationWindow):
         self._status(self.mode_btn.get_tooltip_text())
 
     def _apply_mode_button(self):
-        label, tip = {
-            "loop": ("列表循环", "列表循环：播完最后一首回到第一首"),
-            "order": ("列表播放", "列表播放：按列表顺序播放，播完停止"),
-            "single": ("单曲循环", "单曲循环：重复当前歌曲"),
-            "shuffle": ("随机播放", "随机播放：在当前列表里随机下一首"),
+        icon, tip = {
+            "loop": ("media-playlist-repeat-symbolic", "列表循环：播完最后一首回到第一首"),
+            "order": ("media-playlist-consecutive-symbolic", "列表播放：按列表顺序播放，播完停止"),
+            "single": ("media-playlist-repeat-song-symbolic", "单曲循环：重复当前歌曲"),
+            "shuffle": ("media-playlist-shuffle-symbolic", "随机播放：在当前列表里随机下一首"),
         }[self.play_mode]
-        self.mode_btn.set_label(label)
-        child = self.mode_btn.get_child()
-        if isinstance(child, Gtk.Label):
-            child.override_color(Gtk.StateFlags.NORMAL, Gdk.RGBA(0.13, 0.13, 0.15, 1))
-            child.override_color(Gtk.StateFlags.PRELIGHT, Gdk.RGBA(0.13, 0.13, 0.15, 1))
-            child.override_color(Gtk.StateFlags.ACTIVE, Gdk.RGBA(0.13, 0.13, 0.15, 1))
+        image = self.mode_btn.get_image()
+        if image is not None:
+            image.set_from_icon_name(icon, Gtk.IconSize.BUTTON)
         self.mode_btn.set_tooltip_text(tip)
         self._refresh_queue_popup()
 
     def _hide_queue(self):
-        if self.queue_overlay is not None:
-            self.queue_overlay.set_reveal_child(False)
+        if self.queue_overlay is None:
+            return
+        self.queue_overlay.set_reveal_child(False)
+        if getattr(self, "queue_catcher", None) is not None:
+            self.queue_catcher.hide()
+
+    def _queue_panel_contains(self, event):
+        panel = self.queue_overlay.get_child()
+        if panel is None or not panel.get_mapped():
+            return False
+        origin = panel.translate_coordinates(self.queue_catcher, 0, 0)
+        if origin is None:
+            return False
+        x, y = origin
+        width, height = panel.get_allocated_width(), panel.get_allocated_height()
+        return x <= event.x <= x + width and y <= event.y <= y + height
+
+    def _on_overlay_press(self, _catcher, event):
+        if self.queue_overlay is None or not self.queue_overlay.get_reveal_child():
+            return False
+        if self._queue_panel_contains(event):
+            return False
+        self._hide_queue()
+        return True
 
     def _show_queue(self):
         songs = [song for song in self.playing if isinstance(song, dict) and song.get("name")]
@@ -1169,16 +1915,17 @@ class AppWindow(Gtk.ApplicationWindow):
             self._status("还没有正在播放的列表")
             return
         if self.queue_overlay.get_reveal_child():
-            self.queue_overlay.set_reveal_child(False)
+            self._hide_queue()
             return
         self._refresh_queue_popup()
+        self.queue_catcher.show()
+        self.queue_overlay.show_all()
         self.queue_overlay.set_reveal_child(True)
 
     def _build_comment_page(self):
         bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        back = Gtk.Button(label="返回")
-        back.get_style_context().add_class("flat")
-        back.connect("clicked", lambda *_: self._show_page("list" if len(self.store) else "home"))
+        back = self._icon_button("go-previous-symbolic", lambda: self._show_page("list" if len(self.store) else "home"), "back-btn")
+        back.set_tooltip_text("返回")
         self.comment_title = Gtk.Label(xalign=0)
         self.comment_title.get_style_context().add_class("heading")
         self.comment_count = Gtk.Label(xalign=0)
@@ -1187,15 +1934,17 @@ class AppWindow(Gtk.ApplicationWindow):
         titles.pack_start(self.comment_title, False, False, 0)
         titles.pack_start(self.comment_count, False, False, 0)
         self.comment_hot = Gtk.Button(label="精彩评论")
-        self.comment_hot.get_style_context().add_class("bar-btn")
+        self.comment_hot.get_style_context().add_class("text-btn")
+        self.comment_hot.get_style_context().add_class("on")
         self.comment_hot.set_relief(Gtk.ReliefStyle.NONE)
         self.comment_hot.connect("clicked", lambda *_: self._load_comment_tab("hot"))
         self.comment_latest = Gtk.Button(label="最新评论")
-        self.comment_latest.get_style_context().add_class("bar-btn")
+        self.comment_latest.get_style_context().add_class("text-btn")
         self.comment_latest.set_relief(Gtk.ReliefStyle.NONE)
         self.comment_latest.connect("clicked", lambda *_: self._load_comment_tab("latest"))
         more = Gtk.Button(label="更多")
-        more.get_style_context().add_class("flat")
+        more.get_style_context().add_class("text-btn")
+        more.set_relief(Gtk.ReliefStyle.NONE)
         more.connect("clicked", lambda *_: self._comment_more())
         bar.pack_start(back, False, False, 8)
         bar.pack_start(titles, True, True, 0)
@@ -1229,6 +1978,12 @@ class AppWindow(Gtk.ApplicationWindow):
 
     def _load_comment_tab(self, tab):
         self.comment_tab = tab
+        for name, button in (("hot", self.comment_hot), ("latest", self.comment_latest)):
+            ctx = button.get_style_context()
+            if name == tab:
+                ctx.add_class("on")
+            else:
+                ctx.remove_class("on")
         self._render_comments()
 
     def _comment_more(self):
@@ -1301,9 +2056,8 @@ class AppWindow(Gtk.ApplicationWindow):
 
     def _build_download_page(self):
         bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
-        back = Gtk.Button(label="返回")
-        back.get_style_context().add_class("flat")
-        back.connect("clicked", lambda *_: self._show_page("list" if len(self.store) else "home"))
+        back = self._icon_button("go-previous-symbolic", lambda: self._show_page("list" if len(self.store) else "home"), "back-btn")
+        back.set_tooltip_text("返回")
         title = Gtk.Label(label="下载管理", xalign=0)
         title.get_style_context().add_class("heading")
         bar.pack_start(back, False, False, 8)
@@ -1389,11 +2143,14 @@ class AppWindow(Gtk.ApplicationWindow):
         got = info.get("level") or level
         folder = os.path.join(GLib.get_user_special_dir(GLib.UserDirectory.DIRECTORY_MUSIC) or os.path.expanduser("~/Music"), "网易云音乐")
         os.makedirs(folder, exist_ok=True)
-        ext = info.get("type") or "mp3"
-        name = f"{song.get('artist') or '未知'} - {song.get('name') or song['id']}.{ext}"
-        name = name.replace("/", " ").replace("\x00", "")
+        ext = "".join(ch for ch in str(info.get("type") or "mp3") if ch.isalnum()) or "mp3"
+        raw_name = f"{song.get('artist') or '未知'} - {song.get('name') or song['id']}"
+        raw_name = raw_name.replace("/", " ").replace("\\", " ").replace("\x00", "").strip(" .")
+        name = (raw_name or str(song["id"])) + "." + ext
         dest = os.path.join(folder, name)
-        req = urllib.request.Request(info["url"], headers={"User-Agent": api.UA, "Referer": "https://music.163.com/"})
+        if os.path.commonpath((folder, os.path.abspath(dest))) != os.path.abspath(folder):
+            raise OSError("下载文件名无效")
+        req = urllib.request.Request(_https_media_url(info["url"]), headers={"User-Agent": api.UA, "Referer": "https://music.163.com/"})
         with urllib.request.urlopen(req, timeout=60) as resp, open(dest + ".part", "wb") as handle:
             while True:
                 chunk = resp.read(65536)
@@ -1456,41 +2213,67 @@ class AppWindow(Gtk.ApplicationWindow):
             except (OSError, ValueError):
                 self.local_index = {}
         found = self.local_index.get(str(song.get("id")))
-        if found and os.path.exists(found):
-            return found
-        return ""
+        if not found or not os.path.isfile(found):
+            return ""
+        music = os.path.realpath(
+            GLib.get_user_special_dir(GLib.UserDirectory.DIRECTORY_MUSIC) or os.path.expanduser("~/Music")
+        )
+        target = os.path.realpath(found)
+        if os.path.commonpath((music, target)) != music:
+            return ""
+        return target
 
     def _build_queue_overlay(self):
         # 嵌在主窗口右下角，不另开窗口。Wayland 会忽略独立窗口的 move，还会画出标题栏。
         panel = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         panel.get_style_context().add_class("queue-overlay")
-        panel.set_size_request(300, 340)
+        panel.set_size_request(320, 360)
         panel.set_margin_end(12)
         panel.set_margin_bottom(12)
         panel.set_halign(Gtk.Align.END)
         panel.set_valign(Gtk.Align.END)
         self.queue_heading = Gtk.Label(xalign=0)
-        self.queue_heading.set_margin_start(10)
+        self.queue_heading.set_margin_start(12)
         self.queue_heading.set_margin_top(8)
+        self.queue_heading.set_margin_bottom(2)
+        self.queue_heading.set_margin_end(12)
         self.queue_heading.set_ellipsize(3)
-        self.queue_heading.get_style_context().add_class("heading")
+        self.queue_heading.get_style_context().add_class("queue-head")
         panel.pack_start(self.queue_heading, False, False, 0)
-        self.queue_store = Gtk.ListStore(str, str, str)
-        view = Gtk.TreeView(model=self.queue_store, headers_visible=False)
+        # 0 序号  1 歌名  2 歌手  3 id
+        self.queue_store = Gtk.ListStore(str, str, str, str)
+        view = Gtk.TreeView(model=self.queue_store, headers_visible=True)
+        view.set_enable_search(False)
         view.connect("row-activated", self._on_queue_activate)
+        view.connect("button-press-event", self._on_queue_press)
+        index_cell = Gtk.CellRendererText(xalign=1)
+        index_cell.set_padding(4, 2)
+        index_cell.set_property("scale", 0.86)
+        index_col = Gtk.TreeViewColumn("#", index_cell, text=0)
+        index_col.set_sizing(Gtk.TreeViewColumnSizing.FIXED)
+        index_col.set_fixed_width(36)
+        index_col.set_cell_data_func(index_cell, self._paint_index)
+        view.append_column(index_col)
         title = Gtk.CellRendererText(ellipsize=3)
+        title.set_padding(4, 2)
+        title.set_property("scale", 0.90)
         artist = Gtk.CellRendererText(ellipsize=3)
-        column = Gtk.TreeViewColumn()
+        artist.set_padding(6, 2)
+        artist.set_property("scale", 0.84)
+        column = Gtk.TreeViewColumn("标题")
         column.pack_start(title, True)
         column.pack_start(artist, False)
-        column.add_attribute(title, "text", 0)
-        column.add_attribute(artist, "text", 1)
+        column.add_attribute(title, "text", 1)
+        column.add_attribute(artist, "text", 2)
+        column.set_expand(True)
+        column.set_cell_data_func(title, self._paint_queue_title)
+        column.set_cell_data_func(artist, self._paint_queue_artist)
         view.append_column(column)
         scroll = Gtk.ScrolledWindow()
-        scroll.set_margin_start(6)
-        scroll.set_margin_end(6)
-        scroll.set_margin_bottom(8)
-        scroll.get_style_context().add_class("song-list")
+        scroll.set_margin_start(4)
+        scroll.set_margin_end(4)
+        scroll.set_margin_bottom(6)
+        scroll.get_style_context().add_class("queue-list")
         scroll.add(view)
         panel.pack_start(scroll, True, True, 0)
         revealer = Gtk.Revealer()
@@ -1506,12 +2289,20 @@ class AppWindow(Gtk.ApplicationWindow):
     def _refresh_queue_popup(self):
         if self.queue_overlay is None:
             return
-        self.queue_heading.set_text(f"{self.playing_title or '当前播放'} · {self.mode_btn.get_label()}")
+        names = {"loop": "列表循环", "order": "列表播放", "single": "单曲循环", "shuffle": "随机播放"}
+        self.queue_heading.set_text(f"{self.playing_title or '当前播放'} · {names.get(self.play_mode, '')}")
         self.queue_store.clear()
+        index = 0
         for song in self.playing:
             if not isinstance(song, dict) or not song.get("name"):
                 continue
-            self.queue_store.append([song.get("name") or "", song.get("artist") or "", str(song.get("id") or "")])
+            index += 1
+            self.queue_store.append([
+                f"{index:02d}",
+                song.get("name") or "",
+                song.get("artist") or "",
+                str(song.get("id") or ""),
+            ])
         if 0 <= self.playing_index < len(self.queue_store):
             self.queue_view.set_cursor(Gtk.TreePath(self.playing_index))
             self.queue_view.scroll_to_cell(Gtk.TreePath(self.playing_index), None, True, 0.4, 0)
@@ -1519,17 +2310,36 @@ class AppWindow(Gtk.ApplicationWindow):
     def _on_queue_activate(self, _view, path, _column):
         self._play_from_playing(path.get_indices()[0])
 
+    def _on_queue_press(self, view, event):
+        if event.button != 3:
+            return False
+        path = view.get_path_at_pos(int(event.x), int(event.y))
+        if not path:
+            return False
+        index = path[0].get_indices()[0]
+        if index < 0 or index >= len(self.playing):
+            return False
+        song = self.playing[index]
+        if not isinstance(song, dict) or not song.get("id"):
+            return False
+        view.get_selection().select_path(path[0])
+        self._song_menu(song, index).popup_at_pointer(event)
+        return True
+
     def _save_state(self):
         songs = [song for song in self.playing if song.get("id") and "artist" in song]
         if not songs:
             return
-        position = 0
-        if self.current_song and (self.player.playing() or self.player.paused()):
-            position = self.player.position_ms()
+        position = self.player.cached_pos if self.current_song else 0
+        if position <= 0:
+            position = int(getattr(self, "_resume_at", 0) or 0)
+        duration = self.player.duration_ms() or (self.current_song or {}).get("duration") or 0
         payload = {
             "title": self.playing_title,
+            "source": getattr(self, "playing_source", None),
             "index": self.playing_index,
             "position": position,
+            "duration": duration,
             "quality": self.quality,
             "mode": self.play_mode,
             "songs": songs,
@@ -1559,13 +2369,28 @@ class AppWindow(Gtk.ApplicationWindow):
         self.playing_index = payload.get("index") if isinstance(payload.get("index"), int) else 0
         self.playing_index = min(max(self.playing_index, 0), len(songs) - 1)
         self.current_song = songs[self.playing_index]
-        self.title_btn.set_label(self.current_song.get("name") or "未在播放")
+        self.playing_source = payload.get("source")
+        self.title_btn.set_text(self.current_song.get("name") or "未在播放")
         self.artist_label.set_text(self.current_song.get("artist") or "")
         self._resume_at = int(payload.get("position") or 0)
-        self._status(f"已恢复 {self.current_song.get('name') or ''} · {self.playing_title}")
+        self._resume_duration = int(payload.get("duration") or self.current_song.get("duration") or 0)
+        self._show_paused_progress()
+        self._status(f"已恢复 {self.current_song.get('name') or ''} · {self.playing_title} · 已暂停")
         if self.current_song.get("cover"):
             self._bg(lambda: self._set_remote_image(self.current_song["cover"], self.cover, 46))
-        self._bg(lambda: self._resume_playback(self.current_song, self._resume_at))
+        self._set_play_icon(False)
+        self._refresh_like_button()
+
+    def _show_paused_progress(self):
+        """还没开播时，用上次记下的进度画进度条和时间。"""
+        song = self.current_song or {}
+        elapsed = int(getattr(self, "_resume_at", 0) or 0)
+        total = int(getattr(self, "_resume_duration", 0) or song.get("duration") or 0)
+        if total <= 0:
+            return False
+        self.scale.set_value(min(1000, elapsed * 1000 / total))
+        self.time_label.set_text(f"{fmt_time(elapsed)} / {fmt_time(total)}")
+        return False
 
     def _resume_playback(self, song, position):
         try:
@@ -1592,29 +2417,138 @@ class AppWindow(Gtk.ApplicationWindow):
         GLib.idle_add(self.heading.set_text, "每日推荐")
         GLib.idle_add(self._set_songs, songs, f"每日推荐 {len(songs)} 首")
 
+    def _vip_mark(self, song):
+        """fee 为 1 是 VIP 专享。0 免费，8 是可以试听的非会员曲。"""
+        if not isinstance(song, dict):
+            return ""
+        return "VIP" if int(song.get("fee") or 0) == 1 else ""
+
+    def _row_active(self, model, tree_iter):
+        item = model.get_value(tree_iter, 5) if model.get_n_columns() > 5 else None
+        current = self.current_song or {}
+        if isinstance(item, dict) and current.get("id") and item.get("id") == current.get("id"):
+            return True
+        if model is getattr(self, "queue_store", None) and self.playing_index >= 0:
+            path = model.get_path(tree_iter)
+            return path is not None and path.get_indices()[0] == self.playing_index
+        return False
+
+    def _paint_index(self, _column, cell, model, tree_iter, _data):
+        active = self._row_active(model, tree_iter)
+        cell.set_property("foreground", RED if active else "#B0B0B6")
+        cell.set_property("weight", 700 if active else 400)
+        if model is not getattr(self, "queue_store", None):
+            cell.set_property("font-desc", Pango.FontDescription.from_string("Noto Sans CJK SC 9"))
+
+    def _paint_title(self, _column, cell, model, tree_iter, _data):
+        active = self._row_active(model, tree_iter)
+        cell.set_property("foreground", RED if active else "#222222")
+        cell.set_property("weight", 700 if active else 600)
+        cell.set_property("font-desc", Pango.FontDescription.from_string("Noto Sans CJK SC 9"))
+
+    def _paint_vip(self, _column, cell, model, tree_iter, _data):
+        cell.set_property("foreground", RED)
+        cell.set_property("weight", 700)
+        cell.set_property("scale", 0.82)
+        cell.set_property("font-desc", Pango.FontDescription.from_string("Noto Sans CJK SC 9"))
+
+    def _paint_queue_title(self, _column, cell, model, tree_iter, _data):
+        active = self._row_active(model, tree_iter)
+        cell.set_property("foreground", RED if active else "#222222")
+        cell.set_property("weight", 600 if active else 500)
+        cell.set_property("scale", 0.90)
+
+    def _paint_queue_artist(self, _column, cell, model, tree_iter, _data):
+        active = self._row_active(model, tree_iter)
+        cell.set_property("foreground", RED if active else "#8E8E93")
+        cell.set_property("weight", 500 if active else 400)
+        cell.set_property("scale", 0.84)
+
+    def _fit_song_columns(self, scroll, allocation):
+        """标题列约占内容区一半再少一成，时长左对齐并给滚动条留空。"""
+        if not hasattr(self, "title_col"):
+            return False
+        width = allocation.width
+        if width < 240 or width == getattr(self, "_song_width", 0):
+            return False
+        self._song_width = width
+        # 按用户调好的比例：标题约占一半，专辑约占三成，时长靠右并给滚动条留空。
+        title = max(220, int(width * 0.50))
+        album = max(140, int(width * 0.30))
+        duration = max(86, width - 52 - title - album)
+        self.title_col.set_fixed_width(title)
+        self.album_col.set_fixed_width(album)
+        self.view.get_columns()[-1].set_fixed_width(duration)
+        return False
+
+    def _paint_artist(self, _column, cell, model, tree_iter, _data):
+        active = self._row_active(model, tree_iter)
+        cell.set_property("foreground", RED if active else "#8E8E93")
+        cell.set_property("weight", 600 if active else 400)
+        if model is not getattr(self, "queue_store", None):
+            cell.set_property("font-desc", Pango.FontDescription.from_string("Noto Sans CJK SC 9"))
+
+    def _paint_meta(self, _column, cell, model, tree_iter, _data):
+        active = self._row_active(model, tree_iter)
+        cell.set_property("foreground", RED if active else "#8E8E93")
+        cell.set_property("font-desc", Pango.FontDescription.from_string("Noto Sans CJK SC 9"))
+
     def _set_playlists(self, playlists):
         self.store.clear()
-        for item in playlists:
-            self.store.append(["", item["name"], f"{item['count']} 首", "歌单", "", item, self._cover_placeholder()])
+        for index, item in enumerate(playlists, start=1):
+            self.store.append([
+                f"{index:02d}",
+                item["name"],
+                f"{item['count']} 首",
+                "歌单",
+                "",
+                item,
+                self._cover_placeholder(),
+                "",
+            ])
         self._status(f"{len(playlists)} 个歌单，双击打开")
         return False
 
     def _set_songs(self, songs, status, remember=True):
         self.store.clear()
         placeholder = self._cover_placeholder()
-        for song in songs:
+        for index, song in enumerate(songs, start=1):
             self.store.append([
-                str(song.get("id") or ""),
+                f"{index:02d}",
                 song.get("name") or "",
                 song.get("artist") or "",
                 song.get("album") or "",
                 fmt_time(song.get("duration")),
                 song,
                 placeholder,
+                self._vip_mark(song),
             ])
         self._status(status)
         self._cover_jobs = set()
-        GLib.idle_add(self._fill_visible_covers)
+        self._list_token = getattr(self, "_list_token", 0) + 1
+        self._paint_cached_covers()
+        self._schedule_covers()
+        return False
+
+    def _paint_cached_covers(self):
+        """缓存里已有的封面先画上，不用等接口回来。"""
+        for row in self.store:
+            song = row[5]
+            if not isinstance(song, dict) or not song.get("cover"):
+                continue
+            path = cover_cache_path(song["cover"], 36)
+            if not os.path.exists(path) or os.path.getsize(path) < 32:
+                continue
+            try:
+                row[6] = GdkPixbuf.Pixbuf.new_from_file_at_scale(path, 36, 36, False)
+            except GLib.Error:
+                continue
+        return False
+
+    def _schedule_covers(self):
+        if getattr(self, "_cover_timer", None):
+            GLib.source_remove(self._cover_timer)
+        self._cover_timer = GLib.timeout_add(80, self._fill_visible_covers)
         return False
 
     def _cover_placeholder(self):
@@ -1625,52 +2559,64 @@ class AppWindow(Gtk.ApplicationWindow):
 
     def _visible_rows(self):
         if not self.view.get_realized() or len(self.store) == 0:
-            return range(0, min(12, len(self.store)))
+            return range(0, min(40, len(self.store)))
         visible = self.view.get_visible_range()
         if not visible:
-            return range(0, min(12, len(self.store)))
+            return range(0, min(40, len(self.store)))
         start = max(0, visible[0].get_indices()[0] - 2)
         end = min(len(self.store), visible[1].get_indices()[0] + 6)
         return range(start, end)
 
     def _fill_visible_covers(self):
+        self._cover_timer = None
         if self.stack.get_visible_child_name() != "list":
             return False
         songs = []
         for index in self._visible_rows():
             song = self.store[index][5]
-            if not isinstance(song, dict) or not song.get("id"):
+            if not isinstance(song, dict) or not song.get("id") or song.get("artist") is None:
                 continue
-            if song["id"] in self._cover_jobs:
+            if song.get("id") in self._cover_jobs:
                 continue
-            self._cover_jobs.add(song["id"])
             songs.append(song)
         if songs:
-            self._bg(lambda rows=songs: self._fill_covers(rows))
+            for song in songs:
+                self._cover_jobs.add(song.get("id"))
+            token = getattr(self, "_list_token", 0)
+            self._bg(lambda rows=songs, stamp=token: self._fill_covers(rows, stamp))
         return False
 
-    def _fill_covers(self, songs):
-        pending = [song for song in songs if song.get("id") and not song.get("cover")]
+    def _fill_covers(self, songs, token=None):
+        if token is not None and token != getattr(self, "_list_token", token):
+            return
+        pending = [song for song in songs if song.get("id")]
         if pending:
             try:
+                # 只补没有封面的歌。已有地址不能拿旧接口重刷，旧接口现在不返回图片。
                 api.attach_covers(pending, self.cookie)
             except api.ApiError:
                 pass
+        if token is not None and token != getattr(self, "_list_token", token):
+            return
         for song in songs:
             url = song.get("cover")
             if not url:
                 continue
             try:
-                pix = load_pixbuf(url, 36, rounded=4)
+                pix = load_pixbuf(url, 36, refresh=True)
             except Exception:
                 continue
-            GLib.idle_add(self._set_row_cover, song.get("id"), pix)
+            if token is not None and token != getattr(self, "_list_token", token):
+                return
+            GLib.idle_add(self._set_row_cover, song.get("id"), pix, token)
 
-    def _set_row_cover(self, song_id, pix):
+    def _set_row_cover(self, song_id, pix, token=None):
+        if token is not None and token != getattr(self, "_list_token", token):
+            return False
         for row in self.store:
-            if row[5] and str(row[5].get("id")) == str(song_id):
+            item = row[5]
+            if isinstance(item, dict) and str(item.get("id")) == str(song_id) and item.get("artist") is not None:
                 row[6] = pix
-                break
         return False
 
     def _render_home(self, cards, playlists):
@@ -1750,7 +2696,108 @@ class AppWindow(Gtk.ApplicationWindow):
             return
         GLib.idle_add(widget.set_from_pixbuf, pix)
 
+    def _cell_hit(self, view, x, y):
+        hit = view.get_path_at_pos(int(x), int(y))
+        if not hit:
+            return None
+        path, column, cell_x, _cell_y = hit
+        if path.get_indices()[0] >= len(self.store):
+            return None
+        item = self.store[path][5]
+        if not isinstance(item, dict) or item.get("artist") is None:
+            return None
+        if column is getattr(self, "album_col", None) and item.get("albumId"):
+            return "album", item
+        if column is getattr(self, "title_col", None) and item.get("artistId"):
+            artist_cell = column.get_cells()[-1]
+            positioned = column.cell_get_position(artist_cell)
+            if not positioned:
+                return None
+            start = positioned[1]
+            # 只认歌手文字本身，不要把歌名后面的空白也算进去。
+            layout = view.create_pango_layout(item.get("artist") or "")
+            font = artist_cell.get_property("font-desc")
+            if font is not None:
+                layout.set_font_description(font)
+            text_width = layout.get_pixel_size()[0]
+            if start <= cell_x <= start + text_width + 6:
+                return "artist", item
+        return None
+
+    def _on_list_motion(self, view, event):
+        hit = self._cell_hit(view, event.x, event.y)
+        window = view.get_window()
+        if window is None:
+            return False
+        if hit:
+            window.set_cursor(Gdk.Cursor.new_from_name(window.get_display(), "pointer"))
+            kind, item = hit
+            if kind == "artist":
+                view.set_tooltip_text(f"打开歌手：{item.get('artist') or ''}")
+            else:
+                view.set_tooltip_text(f"打开专辑：{item.get('album') or ''}")
+        else:
+            window.set_cursor(None)
+            view.set_tooltip_text(None)
+        return False
+
+    def _on_list_leave(self, view, _event):
+        window = view.get_window()
+        if window is not None:
+            window.set_cursor(None)
+        view.set_tooltip_text(None)
+        return False
+
+    def _open_artist(self, artist_id, name):
+        if not artist_id:
+            return
+        self._hide_queue()
+        self._browsing_playlist = None
+        self._browsing_liked = False
+        self.heading.set_text(name or "歌手")
+        self._show_page("list")
+        self._status(f"正在打开{name or '歌手'}…")
+        self._bg(lambda: self._load_artist(artist_id, name))
+
+    def _load_artist(self, artist_id, name):
+        try:
+            songs = api.artist_songs(artist_id, self.cookie)
+        except api.ApiError as exc:
+            GLib.idle_add(self._status, str(exc))
+            return
+        GLib.idle_add(self.heading.set_text, name or "歌手")
+        GLib.idle_add(self._set_songs, songs, f"{name or '歌手'} · {len(songs)} 首热门")
+
+    def _open_album(self, album_id, name):
+        if not album_id:
+            return
+        self._hide_queue()
+        self._browsing_playlist = None
+        self._browsing_liked = False
+        self.heading.set_text(name or "专辑")
+        self._show_page("list")
+        self._status(f"正在打开专辑{name or ''}…")
+        self._bg(lambda: self._load_album(album_id, name))
+
+    def _load_album(self, album_id, name):
+        try:
+            data = api.album_detail(album_id, self.cookie)
+        except api.ApiError as exc:
+            GLib.idle_add(self._status, str(exc))
+            return
+        GLib.idle_add(self.heading.set_text, data.get("name") or name or "专辑")
+        GLib.idle_add(self._set_songs, data.get("songs") or [], f"{data.get('name') or name} · {len(data.get('songs') or [])} 首")
+
     def _on_list_press(self, view, event):
+        if event.button == 1:
+            hit = self._cell_hit(view, event.x, event.y)
+            if hit:
+                kind, item = hit
+                if kind == "artist":
+                    self._open_artist(item.get("artistId"), item.get("artist"))
+                else:
+                    self._open_album(item.get("albumId"), item.get("album"))
+                return True
         if event.button != 3:
             return False
         path = view.get_path_at_pos(int(event.x), int(event.y))
@@ -1790,6 +2837,9 @@ class AppWindow(Gtk.ApplicationWindow):
             if isinstance(row[5], dict) and row[5].get("artist") is not None and row[5].get("id")
         ]
         self.playing_title = self.heading.get_text() or "当前播放"
+        self.playing_source = getattr(self, "_browsing_playlist", None)
+        if self.playing_source:
+            self._touch_playlist(self.playing_source)
         self.playing_index = next(
             (i for i, item in enumerate(self.playing) if item.get("id") == song.get("id")),
             0,
@@ -1799,7 +2849,9 @@ class AppWindow(Gtk.ApplicationWindow):
 
     def _play_song(self, song):
         self.current_song = song
-        self.title_btn.set_label(song["name"])
+        self._resume_at = 0
+        self._resume_used = True
+        self.title_btn.set_text(song["name"])
         self.artist_label.set_text(song["artist"] or "未知歌手")
         self.lyric_title.set_text(song["name"])
         self.lyric_artist.set_text(song["artist"] or "")
@@ -1808,6 +2860,10 @@ class AppWindow(Gtk.ApplicationWindow):
         self._bg(lambda: self._start_song(song))
         if song.get("cover"):
             self._bg(lambda: self._set_remote_image(song["cover"], self.cover, 46))
+        self.view.queue_draw()
+        if self.queue_view is not None:
+            self.queue_view.queue_draw()
+        self._refresh_like_button()
 
     def _start_song(self, song):
         try:
@@ -1819,7 +2875,12 @@ class AppWindow(Gtk.ApplicationWindow):
         lines = api.merge_lrc(original, translated)
         local = self._local_file(song)
         if local:
-            info = {"url": "file://" + local, "level": "local", "br": 0, "type": os.path.splitext(local)[1].lstrip(".")}
+            info = {
+                "url": urllib.parse.urljoin("file:", urllib.request.pathname2url(local)),
+                "level": "local",
+                "br": 0,
+                "type": os.path.splitext(local)[1].lstrip("."),
+            }
         if not info:
             GLib.idle_add(self._no_url, song, lines)
             return
@@ -1831,7 +2892,7 @@ class AppWindow(Gtk.ApplicationWindow):
             return False
         self.lyrics = lines
         self._lyric_index = -1
-        self.lyric_buf.set_text("\n".join(line for _, line in lines) or "这首歌没有歌词")
+        self._fill_lyrics(lines)
         level = info.get("level") or ""
         label = api.QUALITY_LABEL.get(level, level)
         note = "，已按账号权限降级" if level and level != self.quality else ""
@@ -1842,8 +2903,7 @@ class AppWindow(Gtk.ApplicationWindow):
         return False
 
     def _no_url(self, song, lines):
-        self.lyrics = lines
-        self.lyric_buf.set_text("\n".join(line for _, line in lines) or "这首歌没有歌词")
+        self._fill_lyrics(lines)
         self._status(f"「{song['name']}」没有可播放地址。" + ("" if self.cookie else "请先登录。"))
         return False
 
@@ -1854,6 +2914,10 @@ class AppWindow(Gtk.ApplicationWindow):
         elif self.player.paused() and self.current_song:
             self.player.resume()
             self._set_play_icon(True)
+        elif self.current_song and self._resume_at and not getattr(self, "_resume_used", False):
+            # 启动时只恢复进度，不自动开播。第一次点播放才从上次的位置继续。
+            self._resume_used = True
+            self._bg(lambda: self._resume_playback(self.current_song, self._resume_at))
         elif self.current_song:
             self._play_from_playing(self.playing_index)
 
@@ -1927,40 +2991,50 @@ class AppWindow(Gtk.ApplicationWindow):
 
     def _tick(self):
         song = self.current_song
+        if song and (self.player.playing() or self.player.paused()) and not self.seeking:
+            self.player.refresh_clock()
         if song and (self.player.playing() or self.player.paused()):
             elapsed = self.player.position_ms()
             total = self.player.duration_ms() or song.get("duration") or 1
-            if not self.seeking and total:
+            if not self.seeking and total and elapsed > 0:
                 self.scale.set_value(min(1000, elapsed * 1000 / total))
-            self.time_label.set_text(f"{fmt_time(elapsed)} / {fmt_time(total)}")
+            shown = elapsed
+            if self.seeking:
+                shown = total * self.scale.get_value() / 1000
+            self.time_label.set_text(f"{fmt_time(shown)} / {fmt_time(total)}")
             self._highlight_lyric(elapsed)
+        elif song and getattr(self, "_resume_at", 0) and not self.player.playing():
+            self._show_paused_progress()
         return True
 
-    def _seek_on_trough(self, event):
-        trough = self.scale.get_range_rect()
-        return trough.y - 4 <= event.y <= trough.y + trough.height + 4
-
-    def _seek_press(self, _scale, event):
-        if not self._seek_on_trough(event):
-            return True
+    def _seek_change(self, scale, scroll, value):
+        # 按下和拖动都走这里。先锁住进度刷新，松手后再真正跳转。
         self.seeking = True
-        return False
+        upper = scale.get_adjustment().get_upper()
+        scale.set_value(max(0, min(upper, value)))
+        return True
 
-    def _seek_motion(self, _scale, event):
-        if self.seeking and not self._seek_on_trough(event):
-            self.seeking = False
-        return False
-
-    def _seek_end(self, _scale, event):
+    def _seek_release(self, _scale, _event):
         if not self.seeking:
-            return True
-        self.seeking = False
-        if not self._seek_on_trough(event):
-            return True
+            return False
         total = self.player.duration_ms() or (self.current_song or {}).get("duration") or 0
+        target = total * self.scale.get_value() / 1000 if total else 0
         if total:
-            self.player.seek_ms(total * self.scale.get_value() / 1000)
+            self.player.seek_ms(target)
+            self._seek_hold = target
+        self._seek_tries = 0
+        GLib.timeout_add(250, self._seek_done, target)
         return False
+
+    def _seek_done(self, target):
+        self._seek_tries = getattr(self, "_seek_tries", 0) + 1
+        pos = self.player.position_ms()
+        close = abs(pos - target) < 4000 and pos > 0
+        if close or not (self.player.playing() or self.player.paused()) or self._seek_tries >= 8:
+            self.seeking = False
+            self._seek_hold = 0
+            return False
+        return True
 
     def _highlight_lyric(self, elapsed):
         if not self.lyrics or not self.lyric_open:
@@ -1975,16 +3049,35 @@ class AppWindow(Gtk.ApplicationWindow):
             return
         self._lyric_index = current
         self._mark_lyric(current)
-        start = self.lyric_buf.get_iter_at_line(current)
-        self.lyric_view.scroll_to_iter(start, 0.2, True, 0.0, 0.42)
+        start = self.lyric_buf.get_iter_at_line(current + getattr(self, "_lyric_pad", 0))
+        self.lyric_view.scroll_to_iter(start, 0.15, True, 0.0, 0.46)
+
+    def _fill_lyrics(self, lines):
+        self.lyrics = lines
+        self._lyric_index = -1
+        text = "\n" * 4 + ("\n".join(line for _, line in lines) or "这首歌没有歌词") + "\n" * 6
+        self.lyric_buf.set_text(text)
+        self._lyric_pad = 4
+
+    def _lyric_tags(self):
+        if hasattr(self, "_lyric_now"):
+            return
+        self._lyric_now = self.lyric_buf.create_tag("now", foreground="#FFFFFF", weight=700, scale=1.35)
+        self._lyric_near = self.lyric_buf.create_tag("near", foreground="#C8C8CC", scale=1.05)
+        self._lyric_far = self.lyric_buf.create_tag("far", foreground="#8E8E93")
 
     def _mark_lyric(self, current):
+        self._lyric_tags()
+        pad = getattr(self, "_lyric_pad", 0)
         self.lyric_buf.remove_all_tags(self.lyric_buf.get_start_iter(), self.lyric_buf.get_end_iter())
-        start = self.lyric_buf.get_iter_at_line(current)
-        end = self.lyric_buf.get_iter_at_line(current + 1) if current + 1 < len(self.lyrics) else self.lyric_buf.get_end_iter()
-        if not hasattr(self, "_lyric_tag"):
-            self._lyric_tag = self.lyric_buf.create_tag("current", foreground=RED, weight=700, scale=1.15)
-        self.lyric_buf.apply_tag(self._lyric_tag, start, end)
+        last = self.lyric_buf.get_line_count()
+        for offset, tag in ((0, self._lyric_now), (-1, self._lyric_near), (1, self._lyric_near)):
+            line = current + pad + offset
+            if line < 0 or line >= last:
+                continue
+            start = self.lyric_buf.get_iter_at_line(line)
+            end = self.lyric_buf.get_iter_at_line(line + 1) if line + 1 < last else self.lyric_buf.get_end_iter()
+            self.lyric_buf.apply_tag(tag, start, end)
 
     def _lyric_click(self, _view, event):
         if event.button != 1 or not self.lyrics:
@@ -1993,7 +3086,7 @@ class AppWindow(Gtk.ApplicationWindow):
         found, it = self.lyric_view.get_iter_at_location(x, y)
         if not found:
             return False
-        line = it.get_line()
+        line = it.get_line() - getattr(self, "_lyric_pad", 0)
         if 0 <= line < len(self.lyrics):
             self.player.seek_ms(self.lyrics[line][0])
         return False
@@ -2026,12 +3119,11 @@ class AppWindow(Gtk.ApplicationWindow):
         if AppIndicator is not None:
             try:
                 self.indicator = AppIndicator.Indicator.new(
-                    APP_ID, "netease-music-linux", AppIndicator.IndicatorCategory.APPLICATION_STATUS,
+                    APP_ID, "audio-x-generic", AppIndicator.IndicatorCategory.APPLICATION_STATUS,
                 )
-                if os.path.exists(ICON) and not ICON.endswith("-generic"):
+                # 必须传文件绝对路径。主题名会先命中 ~/.local 里的旧图标。
+                if ICON:
                     self.indicator.set_icon_full(os.path.abspath(ICON), "网易云音乐")
-                else:
-                    self.indicator.set_icon_full("audio-x-generic", "网易云音乐")
                 self.indicator.set_status(AppIndicator.IndicatorStatus.ACTIVE)
                 self.indicator.set_menu(menu)
                 self.indicator.set_activate_target(show)
@@ -2039,7 +3131,7 @@ class AppWindow(Gtk.ApplicationWindow):
                 return
             except Exception:
                 self.indicator = None
-        if os.path.exists(ICON) and not ICON.endswith("-generic"):
+        if ICON:
             self.status_icon = Gtk.StatusIcon.new_from_file(ICON)
         else:
             self.status_icon = Gtk.StatusIcon.new_from_icon_name("audio-x-generic")
@@ -2157,7 +3249,12 @@ class AppWindow(Gtk.ApplicationWindow):
             return
         self.profile = profile
         self.mine = playlists
+        try:
+            self.liked_ids = set(api.liked_ids(self.cookie))
+        except api.ApiError:
+            pass
         GLib.idle_add(self._account_ready, profile, playlists)
+        GLib.idle_add(self._refresh_like_button)
 
     def _account_ready(self, profile, playlists):
         vip = profile.get("vip") or ""
@@ -2319,6 +3416,11 @@ class MusicApp(Gtk.Application):
 
     def do_startup(self):
         Gtk.Application.do_startup(self)
+        if ICON:
+            try:
+                Gtk.Window.set_default_icon_from_file(ICON)
+            except GLib.Error:
+                pass
         action = Gio.SimpleAction.new("quit", None)
         action.connect("activate", lambda *_: self.quit_player())
         self.add_action(action)
@@ -2338,6 +3440,7 @@ class MusicApp(Gtk.Application):
 
 def main():
     os.makedirs(DATA_DIR, exist_ok=True)
+    os.chmod(DATA_DIR, 0o700)
     raise SystemExit(MusicApp().run([os.path.abspath(__file__)]))
 
 

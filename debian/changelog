@@ -1,3 +1,10 @@
+netease-music-linux (1.2.2-1) unstable; urgency=medium
+
+  * Use the packaged note icon for both the taskbar and the tray.
+  * Keep the login cookie private and reject playback URLs outside NetEase.
+
+ -- Shang Xiaoyang <shangxiaoyang@kylinos.cn>  Thu, 08 Oct 2026 18:10:00 +0800
+
 netease-music-linux (1.2.1-1) unstable; urgency=medium
 
   * Give the progress bar its own row so the slider is no longer a lone circle.
