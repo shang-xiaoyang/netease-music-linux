@@ -18,3 +18,6 @@ debian/tmp/
 login-qr.png
 cookie
 state.json
+desk-lyric.json
+desk-lyric-pos.json
+desk-lyric-state.json

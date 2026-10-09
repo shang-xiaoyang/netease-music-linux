@@ -12,6 +12,7 @@ import io
 import json
 import os
 import re
+import sys
 import subprocess
 import threading
 import time
@@ -44,6 +45,9 @@ COOKIE_PATH = os.path.join(DATA_DIR, "cookie")
 QUALITY_PATH = os.path.join(DATA_DIR, "quality")
 VOLUME_PATH = os.path.join(DATA_DIR, "volume")
 WINDOW_PATH = os.path.join(DATA_DIR, "window.json")
+LYRIC_PATH = os.path.join(DATA_DIR, "desk-lyric.json")
+LYRIC_POS_PATH = os.path.join(DATA_DIR, "desk-lyric-pos.json")
+LYRIC_STATE_PATH = os.path.join(DATA_DIR, "desk-lyric-state.json")
 STATE_PATH = os.path.join(DATA_DIR, "state.json")
 RECENT_PATH = os.path.join(DATA_DIR, "recent-playlists.json")
 MODE_PATH = os.path.join(DATA_DIR, "play-mode")
@@ -125,6 +129,15 @@ window {{
 .card-sub {{
     color: alpha(white, 0.88);
     font-size: 11px;
+}}
+button.feature-card {{
+    padding: 0;
+    border: none;
+    background: transparent;
+    box-shadow: none;
+}}
+button.feature-card:hover {{
+    background: transparent;
 }}
 .cover-name {{
     color: #222;
@@ -233,10 +246,19 @@ window {{
 .player-controls {{
     padding: 2px 12px 4px;
 }}
-.desk-lyric {{
-    color: #FFFFFF;
-    font-size: 22px;
-    font-weight: 600;
+.desk-lyric-plate {{
+    background: rgba(232, 232, 234, 0.78);
+    border-radius: 8px;
+}}
+.desk-lyric-close {{
+    color: #F3A3A3;
+    background: rgba(255, 255, 255, 0.55);
+    border-radius: 11px;
+    font-size: 15px;
+    font-weight: 700;
+    min-width: 21px;
+    min-height: 21px;
+    padding: 0;
 }}
 .time-pill {{
     background: #FFFFFF;
@@ -827,22 +849,47 @@ def load_pixbuf(url, size, rounded=8, refresh=False):
 
 
 class Player:
-    def __init__(self, on_end):
+    def __init__(self, on_end, on_state=None):
         self.playbin = Gst.ElementFactory.make("playbin", "netease")
         self.on_end = on_end
+        self.on_state = on_state
         self.cached_pos = 0
         self.cached_dur = 0
         self._querying = False
+        self._clock_thread = None
+        self._want = "stopped"
+        self._started_at = 0.0
+        self._anchor_pos = 0
         bus = self.playbin.get_bus()
         bus.add_signal_watch()
         bus.connect("message", self._on_message)
 
+    def _emit_state(self):
+        if self.on_state:
+            GLib.idle_add(self.on_state, self._want)
+
     def _on_message(self, _bus, message):
         if message.type == Gst.MessageType.EOS:
+            self._want = "stopped"
+            self._emit_state()
             GLib.idle_add(self.on_end)
         elif message.type == Gst.MessageType.ERROR:
+            self._want = "stopped"
+            self._emit_state()
             err, _dbg = message.parse_error()
             GLib.idle_add(self.on_end, str(err))
+        elif message.type == Gst.MessageType.ASYNC_DONE and self._want == "playing":
+            self._started_at = time.time()
+            self._emit_state()
+        elif message.type == Gst.MessageType.STATE_CHANGED and message.src == self.playbin:
+            _old, new, _pending = message.parse_state_changed()
+            if new == Gst.State.PLAYING:
+                self._want = "playing"
+                self._started_at = time.time()
+                self._emit_state()
+            elif new == Gst.State.PAUSED and self._want == "playing":
+                # 缓冲会经过暂停。只有用户暂停才改按钮，不把开播中的按钮打回播放。
+                self._emit_state()
 
     def play(self, url):
         parsed = urllib.parse.urlparse(str(url or ""))
@@ -854,76 +901,98 @@ class Player:
         if not remote and not local:
             raise OSError("播放地址不被允许")
         self.playbin.set_state(Gst.State.NULL)
+        self.cached_pos = 0
+        self.cached_dur = 0
+        self._anchor_pos = 0
+        self._started_at = time.time()
+        self._want = "playing"
+        self._emit_state()
         self.playbin.set_property("uri", url)
         self.playbin.set_property("volume", 1.0)
         self.playbin.set_state(Gst.State.PLAYING)
 
     def stop(self):
+        self._want = "stopped"
         self.playbin.set_state(Gst.State.NULL)
+        self._emit_state()
 
     def pause(self):
+        self._want = "paused"
+        self._anchor_pos = self.cached_pos
+        self._started_at = 0
         self.playbin.set_state(Gst.State.PAUSED)
+        self._emit_state()
 
     def resume(self):
+        self._want = "playing"
+        self._anchor_pos = self.cached_pos
+        self._started_at = time.time()
         self.playbin.set_state(Gst.State.PLAYING)
+        self._emit_state()
 
     def playing(self):
-        _ok, state, _pending = self.playbin.get_state(0)
-        return state == Gst.State.PLAYING
+        return self._want == "playing"
 
     def paused(self):
+        if self._want == "paused":
+            return True
         _ok, state, _pending = self.playbin.get_state(0)
         return state == Gst.State.PAUSED
 
     def position_ms(self):
-        # 歌词要用当前时钟，不能等后台查询回来。查询晚半秒，高亮就会落在声音后面。
-        try:
-            ok, value = self.playbin.query_position(Gst.Format.TIME)
-        except Exception:
-            ok = False
-            value = 0
-        if ok:
-            pos = int(value / 1_000_000)
-            recent = time.time() - getattr(self, "_seek_stamp", 0) < 1.2
-            target = getattr(self, "_seek_target", 0)
-            if not (recent and pos < 800 and target > 1500):
-                self.cached_pos = pos
+        # 界面线程只读缓存。管道查询会卡住界面，放到后台线程里做。
+        if self._want == "playing" and self._started_at:
+            guessed = self._anchor_pos + int((time.time() - self._started_at) * 1000)
+            if guessed > self.cached_pos:
+                self.cached_pos = guessed
         return self.cached_pos
 
     def duration_ms(self):
         return self.cached_dur
 
     def refresh_clock(self):
-        # 查询必须离开界面线程。跳转时管道会短暂停住，在界面线程里查会把窗口卡死。
-        if self._querying:
+        # 一条后台线程轮询时钟。每拍新建线程会把空闲时的 CPU 抬起来。
+        if self._clock_thread and self._clock_thread.is_alive():
             return
         self._querying = True
 
         def work():
-            pos = dur = 0
-            try:
-                ok, value = self.playbin.query_position(Gst.Format.TIME)
-                if ok:
-                    pos = int(value / 1_000_000)
-                ok, value = self.playbin.query_duration(Gst.Format.TIME)
-                if ok:
-                    dur = int(value / 1_000_000)
-            except Exception:
-                pass
-            GLib.idle_add(self._store_clock, pos, dur)
+            while self._want in ("playing", "paused"):
+                pos = dur = 0
+                try:
+                    ok, value = self.playbin.query_position(Gst.Format.TIME)
+                    if ok and value > 0:
+                        pos = int(value / 1_000_000)
+                    ok, value = self.playbin.query_duration(Gst.Format.TIME)
+                    if ok:
+                        dur = int(value / 1_000_000)
+                except Exception:
+                    pass
+                GLib.idle_add(self._store_clock, pos, dur)
+                time.sleep(0.4 if self._want == "playing" else 1.2)
+            self._querying = False
 
-        threading.Thread(target=work, daemon=True).start()
+        self._clock_thread = threading.Thread(target=work, daemon=True)
+        self._clock_thread.start()
+
+    def _seek_landed(self, pos):
+        """暂停时查询仍会报跳转前的位置。没落到目标附近之前，不拿它覆盖点击位置。"""
+        target = getattr(self, "_seek_target", None)
+        if target is None:
+            return True
+        if time.time() - getattr(self, "_seek_stamp", 0) > 4:
+            self._seek_target = None
+            return True
+        return abs(pos - target) < 1500
 
     def _store_clock(self, pos, dur):
-        # 跳转清空管道时，位置会先报 0。这一小段仍显示点击的位置。
-        recent = time.time() - getattr(self, "_seek_stamp", 0) < 1.2
-        target = getattr(self, "_seek_target", 0)
-        if recent and pos < 800 and target > 1500:
-            pos = self.cached_pos
-        self.cached_pos = pos
+        # 跳转清空管道时，位置会先报旧值或 0。没落到目标附近就继续显示点击的位置。
+        if pos and self._seek_landed(pos):
+            self.cached_pos = pos
+            self._anchor_pos = pos
+            self._started_at = time.time()
         if dur:
             self.cached_dur = dur
-        self._querying = False
         return False
 
     def seek_ms(self, ms):
@@ -931,11 +1000,28 @@ class Player:
         self.cached_pos = target
         self._seek_target = target
         self._seek_stamp = time.time()
-        self.playbin.seek_simple(
-            Gst.Format.TIME,
-            Gst.SeekFlags.FLUSH | Gst.SeekFlags.KEY_UNIT,
-            target * Gst.MSECOND,
-        )
+        # 查询和跳转都不能在界面线程里等管道。暂停时尤其容易卡住，所以丢到后台。
+        threading.Thread(target=self._seek_worker, args=(target,), daemon=True).start()
+
+    def _seek_worker(self, target):
+        try:
+            _ok, state, _pending = self.playbin.get_state(500 * Gst.MSECOND)
+            if state == Gst.State.NULL:
+                return
+            if state not in (Gst.State.PAUSED, Gst.State.PLAYING):
+                self.playbin.set_state(Gst.State.PAUSED)
+                self.playbin.get_state(500 * Gst.MSECOND)
+            # 暂停时 KEY_UNIT 经常被合成器丢掉，滑块就会弹回原位。精确跳转能停在点击处。
+            flags = Gst.SeekFlags.FLUSH | Gst.SeekFlags.ACCURATE
+            ok = self.playbin.seek_simple(Gst.Format.TIME, flags, int(target) * Gst.MSECOND)
+            if not ok:
+                self.playbin.seek_simple(
+                    Gst.Format.TIME,
+                    Gst.SeekFlags.FLUSH | Gst.SeekFlags.KEY_UNIT,
+                    int(target) * Gst.MSECOND,
+                )
+        except Exception:
+            return
 
     def set_volume(self, value):
         # 播放器增益保持 1。滑条改的是系统音量，不在软件里再乘一次。
@@ -948,7 +1034,10 @@ class AppWindow(Gtk.ApplicationWindow):
         # 和启动器的 StartupWMClass 一致，任务栏才能配上同一张图标。
         self.set_wmclass(APP_ID, APP_ID)
         self.set_default_size(1080, 680)
+        # 列表再长也只在窗口内部滚动。不锁住的话，专辑页会把窗口顶出屏幕。
+        self.set_size_request(860, 560)
         self._restore_window()
+        self._clamp_window()
         if ICON:
             try:
                 self.set_icon_from_file(ICON)
@@ -958,7 +1047,7 @@ class AppWindow(Gtk.ApplicationWindow):
         self.cookie = api.load_cookie(COOKIE_PATH)
         self.profile = None
         self.mine = []
-        self.player = Player(self._on_track_end)
+        self.player = Player(self._on_track_end, self._on_player_state)
         # playing 是正在播放的列表，和左侧正在浏览的列表分开。
         # 只有双击另一份列表里的歌，才会换掉它。
         self.playing = []
@@ -997,8 +1086,11 @@ class AppWindow(Gtk.ApplicationWindow):
         self.connect("key-press-event", self._on_key)
         self.connect("button-press-event", self._on_window_press)
         self.connect("configure-event", self._remember_window)
-        GLib.timeout_add(200, self._tick)
+        GLib.timeout_add(400, self._tick)
         self.show_all()
+        self._clamp_window()
+        if self._desk_lyric_wanted():
+            self._launch_desk_lyric()
         self.stack.set_visible_child_name("home")
         self._status("正在加载推荐…")
         self._restore_state()
@@ -1278,6 +1370,7 @@ class AppWindow(Gtk.ApplicationWindow):
         self.scale.connect("change-value", self._seek_change)
         self.scale.connect("button-press-event", self._seek_press)
         self.scale.connect("button-release-event", self._seek_release)
+        self.scale.connect("motion-notify-event", self._seek_motion)
         self.time_label = Gtk.Label(label="00:00 / 00:00")
         self.time_label.get_style_context().add_class("time-pill")
         self.time_label.set_no_show_all(True)
@@ -1428,6 +1521,9 @@ class AppWindow(Gtk.ApplicationWindow):
 
     def _pulse_stream(self):
         """只找本播放器的 PulseAudio 播放流，不改整机输出。"""
+        cached = getattr(self, "_pulse_cache", None)
+        if cached and time.time() - cached[0] < 3:
+            return cached[1]
         try:
             out = subprocess.check_output(
                 ["pactl", "list", "sink-inputs"],
@@ -1445,6 +1541,7 @@ class AppWindow(Gtk.ApplicationWindow):
                 current = head.split("#", 1)[1].strip()
             elif current and "application.process.id" in head and f"= \"{os.getpid()}\"" in head:
                 matched = current
+        self._pulse_cache = (time.time(), matched)
         return matched
 
     def _system_volume(self):
@@ -1512,17 +1609,41 @@ class AppWindow(Gtk.ApplicationWindow):
             # 截图和调试窗口写过偏矮的尺寸，那种不拿来当默认高度。
             if height < 560:
                 height = 680
-            self.set_default_size(max(860, width), height)
+            width, height = self._fit_window(width, height)
+            self.set_default_size(width, height)
             if data.get("x") is not None:
                 self.move(int(data["x"]), int(data["y"]))
         except (OSError, ValueError, TypeError):
             pass
+
+    def _fit_window(self, width, height):
+        """窗口不能高过当前屏幕。已经撑出去的尺寸收回到工作区里。"""
+        width = max(860, int(width))
+        height = max(560, int(height))
+        screen = self.get_screen()
+        monitor = screen.get_monitor_at_window(self.get_window()) if self.get_window() else 0
+        geom = screen.get_monitor_geometry(monitor)
+        limit_w = max(860, geom.width - 48)
+        limit_h = max(560, geom.height - 80)
+        return min(width, limit_w), min(height, limit_h)
+
+    def _clamp_window(self):
+        width, height = self.get_size()
+        fitted = self._fit_window(width, height)
+        if fitted != (width, height):
+            self.resize(*fitted)
+        return False
 
     def _remember_window(self, *_args):
         width, height = self.get_size()
         x, y = self.get_position()
         if width < 200 or height < 200:
             return False
+        width, height = self._fit_window(width, height)
+        now = time.time()
+        if now - getattr(self, "_window_saved_at", 0) < 1.5:
+            return False
+        self._window_saved_at = now
         try:
             os.makedirs(DATA_DIR, exist_ok=True)
             with open(WINDOW_PATH, "w", encoding="utf-8") as handle:
@@ -1550,9 +1671,10 @@ class AppWindow(Gtk.ApplicationWindow):
 
     def _song_menu(self, song, index):
         menu = Gtk.Menu()
+        liked = self._song_liked(song)
         items = (
             ("下一首播放", lambda: self._play_next(song)),
-            ("喜欢 / 取消喜欢", lambda: self._toggle_like(song)),
+            ("取消喜欢" if liked else "加入喜欢", lambda: self._toggle_like(song)),
             ("下载", lambda: self._enqueue_download(song)),
             ("查看评论", lambda: self._open_comments(song)),
         )
@@ -2133,7 +2255,7 @@ class AppWindow(Gtk.ApplicationWindow):
         note = "，已换成这首歌能播的最高档" if level and level != self.quality else ""
         kbps = int((info.get("br") or 0) / 1000)
         self._status(f"正在播放 · {label} · {kbps}kbps {(info.get('type') or '').upper()}{note}")
-        self._set_play_icon(True)
+        self._sync_play_icon()
         return False
 
     def _fill_nav(self):
@@ -2255,7 +2377,8 @@ class AppWindow(Gtk.ApplicationWindow):
         if not url:
             return
         try:
-            pix = load_pixbuf(url, 14 * max(2, _screen_scale()))
+            pix = load_pixbuf(url, 28)
+            pix = pix.scale_simple(14, 14, GdkPixbuf.InterpType.BILINEAR)
         except Exception:
             return
         GLib.idle_add(self._apply_nav_cover, image, pix)
@@ -2350,6 +2473,8 @@ class AppWindow(Gtk.ApplicationWindow):
 
     def _show_home(self):
         self.lyric_open = False
+        # 播放列表遮罩在启动时可能还铺在首页上，第一次点击会被它吃掉。
+        self._hide_queue()
         self._show_page("home")
 
     def _open_playlist(self, ident, name, mine=False):
@@ -2562,6 +2687,7 @@ class AppWindow(Gtk.ApplicationWindow):
         self.album_store = Gtk.ListStore(str, str, str, str, str, object, GdkPixbuf.Pixbuf, str)
         self.album_view = Gtk.TreeView(model=self.album_store, headers_visible=True)
         self.album_view.connect("row-activated", self._on_album_activate)
+        self.album_view.connect("button-press-event", self._on_detail_press)
         index_cell = Gtk.CellRendererText(xalign=1)
         index_col = Gtk.TreeViewColumn("#", index_cell, text=0)
         index_col.set_fixed_width(52)
@@ -2585,8 +2711,12 @@ class AppWindow(Gtk.ApplicationWindow):
         songs.set_margin_top(16)
         song_label = Gtk.Label(label="歌曲", xalign=0)
         song_label.get_style_context().add_class("section-label")
+        song_scroll = Gtk.ScrolledWindow()
+        song_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        song_scroll.set_vexpand(True)
+        song_scroll.add(self.album_view)
         songs.pack_start(song_label, False, False, 0)
-        songs.pack_start(self.album_view, True, True, 0)
+        songs.pack_start(song_scroll, True, True, 0)
         body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         body.set_margin_start(18)
         body.set_margin_end(18)
@@ -2639,6 +2769,7 @@ class AppWindow(Gtk.ApplicationWindow):
         self.artist_store = Gtk.ListStore(str, str, str, str, str, object, GdkPixbuf.Pixbuf, str)
         self.artist_view = Gtk.TreeView(model=self.artist_store, headers_visible=True)
         self.artist_view.connect("row-activated", self._on_artist_activate)
+        self.artist_view.connect("button-press-event", self._on_detail_press)
         index_cell = Gtk.CellRendererText(xalign=1)
         index_col = Gtk.TreeViewColumn("#", index_cell, text=0)
         index_col.set_fixed_width(52)
@@ -3207,7 +3338,11 @@ class AppWindow(Gtk.ApplicationWindow):
 
     def _place_time_pill(self, elapsed, total):
         """时间胶囊跟着进度滑块走，贴在进度条中间偏上。"""
-        self.time_label.set_text(f"{fmt_time(elapsed)} / {fmt_time(total)}")
+        text = f"{fmt_time(elapsed)} / {fmt_time(total)}"
+        if text == getattr(self, "_time_text", None) and not self.seeking:
+            return False
+        self._time_text = text
+        self.time_label.set_text(text)
         width = self.scale.get_allocated_width()
         if width <= 24 or not total:
             self.time_label.set_halign(Gtk.Align.CENTER)
@@ -3495,30 +3630,78 @@ class AppWindow(Gtk.ApplicationWindow):
             grid.add(self._cover_tile(item))
         self.home_box.pack_start(grid, False, False, 0)
         self.home_box.show_all()
+        self._hide_queue()
         return False
 
     def _feature_card(self, name, color, playlist_id):
+        """推荐榜单卡片。封面图里已有榜名，不再叠字。用按钮接收点击。"""
         button = Gtk.Button()
         button.set_relief(Gtk.ReliefStyle.NONE)
-        button.set_size_request(150, 110)
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        box.set_margin_start(12)
-        box.set_margin_top(16)
-        box.set_margin_end(12)
-        label = Gtk.Label(label=name, xalign=0)
-        label.get_style_context().add_class("card-title")
-        sub = Gtk.Label(label="点击打开", xalign=0)
-        sub.get_style_context().add_class("card-sub")
-        box.pack_start(label, False, False, 0)
-        box.pack_start(sub, False, False, 4)
-        button.add(box)
-        provider = Gtk.CssProvider()
-        provider.load_from_data(
-            f"button {{ background: {color}; border-radius: 12px; border: none; }}".encode()
-        )
-        button.get_style_context().add_provider(provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        button.set_hexpand(False)
+        button.set_halign(Gtk.Align.START)
+        button.set_size_request(148, 78)
+        button.set_tooltip_text(name)
+        image = Gtk.Image()
+        image.set_halign(Gtk.Align.CENTER)
+        image.set_valign(Gtk.Align.CENTER)
+        button.add(image)
+        button.get_style_context().add_class("feature-card")
         button.connect("clicked", lambda *_: self._open_playlist(playlist_id, name))
+        self._bg(lambda: self._load_feature_cover(image, playlist_id, color))
         return button
+
+    def _load_feature_cover(self, image, playlist_id, color):
+        cover = self._chart_cover(playlist_id)
+        pix = self._feature_placeholder(color, 148, 78)
+        if cover:
+            try:
+                loaded = load_pixbuf(cover, 148)
+                loaded = loaded.scale_simple(148, 78, GdkPixbuf.InterpType.BILINEAR)
+                pix = self._rounded_pixbuf(loaded, 8)
+            except Exception:
+                pass
+        GLib.idle_add(self._apply_feature_cover, image, pix)
+
+    def _apply_feature_cover(self, image, pix):
+        if image.get_parent() is None:
+            return False
+        image.set_from_pixbuf(pix)
+        return False
+
+    def _feature_placeholder(self, color, width=176, height=88):
+        surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, width, height)
+        ctx = cairo.Context(surface)
+        red, green, blue = self._hex_rgb(color)
+        ctx.set_source_rgb(red, green, blue)
+        self._round_rect(ctx, 0, 0, width, height, 8)
+        ctx.fill()
+        return _pixbuf_from_surface(surface)
+
+    def _rounded_pixbuf(self, pixbuf, radius):
+        width, height = pixbuf.get_width(), pixbuf.get_height()
+        surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, width, height)
+        ctx = cairo.Context(surface)
+        self._round_rect(ctx, 0, 0, width, height, radius)
+        ctx.clip()
+        ctx.set_source_surface(self._surface_from_pixbuf(pixbuf), 0, 0)
+        ctx.paint()
+        return _pixbuf_from_surface(surface)
+
+    def _surface_from_pixbuf(self, pixbuf):
+        _ok, data = pixbuf.save_to_bufferv("png", [], [])
+        return cairo.ImageSurface.create_from_png(io.BytesIO(data))
+
+    def _hex_rgb(self, color):
+        text = color.lstrip("#")
+        return tuple(int(text[index:index + 2], 16) / 255 for index in (0, 2, 4))
+
+    def _round_rect(self, ctx, x, y, width, height, radius):
+        ctx.new_sub_path()
+        ctx.arc(x + width - radius, y + radius, radius, -1.5708, 0)
+        ctx.arc(x + width - radius, y + height - radius, radius, 0, 1.5708)
+        ctx.arc(x + radius, y + height - radius, radius, 1.5708, 3.1416)
+        ctx.arc(x + radius, y + radius, radius, 3.1416, 4.7124)
+        ctx.close_path()
 
     def _cover_tile(self, item):
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
@@ -3777,6 +3960,21 @@ class AppWindow(Gtk.ApplicationWindow):
         self._song_menu(item, path[0].get_indices()[0]).popup_at_pointer(event)
         return True
 
+    def _on_detail_press(self, view, event):
+        """歌手页、专辑页和主列表共用右键菜单。这些页的行不在播放队列里。"""
+        if event.button != 3:
+            return False
+        path = view.get_path_at_pos(int(event.x), int(event.y))
+        if not path:
+            return False
+        model = view.get_model()
+        item = model[path[0]][5]
+        if not isinstance(item, dict) or not item.get("id"):
+            return False
+        view.get_selection().select_path(path[0])
+        self._song_menu(item, -1).popup_at_pointer(event)
+        return True
+
     def _on_activate(self, _view, path, _column):
         item = self.store[path][5]
         if not item:
@@ -3892,7 +4090,7 @@ class AppWindow(Gtk.ApplicationWindow):
         note = "，已按账号权限降级" if level and level != self.quality else ""
         kbps = int((info.get("br") or 0) / 1000)
         self._status(f"正在播放 · {label} · {kbps}kbps {(info.get('type') or '').upper()}{note}")
-        self._set_play_icon(True)
+        self._sync_play_icon()
         self._refresh_like_button()
         return False
 
@@ -3901,95 +4099,115 @@ class AppWindow(Gtk.ApplicationWindow):
         self._status(f"「{song['name']}」没有可播放地址。" + ("" if self.cookie else "请先登录。"))
         return False
 
+    def _desk_lyric_wanted(self):
+        try:
+            payload = json.loads(open(LYRIC_STATE_PATH, encoding="utf-8").read())
+            return bool(payload.get("open"))
+        except (OSError, json.JSONDecodeError, TypeError):
+            return False
+
+    def _remember_desk_lyric(self, open_):
+        try:
+            os.makedirs(DATA_DIR, exist_ok=True)
+            tmp = LYRIC_STATE_PATH + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as handle:
+                json.dump({"open": bool(open_)}, handle)
+            os.replace(tmp, LYRIC_STATE_PATH)
+        except OSError:
+            pass
+
     def _toggle_desk_lyric(self):
-        window = getattr(self, "_desk_lyric", None)
-        if window is not None and window.get_visible():
-            window.hide()
+        """歌词是单独的 XWayland 窗口。主窗口留在 Wayland，才能跟上系统缩放。"""
+        if self._desk_lyric_alive():
+            self._close_desk_lyric()
+            self._remember_desk_lyric(False)
+            self._status("桌面歌词已关闭")
             return
-        if window is None:
-            window = self._build_desk_lyric()
-            self._desk_lyric = window
-        self._update_desk_lyric()
-        window.present()
+        self._launch_desk_lyric()
+        self._remember_desk_lyric(True)
 
-    def _build_desk_lyric(self):
-        """桌面歌词不进任务栏，可拖动，双击关闭。"""
-        window = Gtk.Window(type=Gtk.WindowType.POPUP)
-        window.set_title("桌面歌词")
-        window.set_decorated(False)
-        window.set_type_hint(Gdk.WindowTypeHint.UTILITY)
-        window.set_keep_above(True)
-        window.set_skip_taskbar_hint(True)
-        window.set_skip_pager_hint(True)
-        window.set_accept_focus(False)
-        window.set_app_paintable(True)
-        window.set_resizable(False)
-        window.set_default_size(640, 64)
-        screen = window.get_screen()
-        window.move(max(0, (screen.get_width() - 640) // 2), max(0, screen.get_height() - 112))
-        visual = screen.get_rgba_visual()
-        if visual is not None:
-            window.set_visual(visual)
-        label = Gtk.Label(label="暂无歌词")
-        label.set_ellipsize(Pango.EllipsizeMode.END)
-        label.set_max_width_chars(36)
-        label.get_style_context().add_class("desk-lyric")
-        window.add(label)
-        window.lyric_label = label
-        window.connect("button-press-event", self._desk_lyric_press)
-        window.connect("motion-notify-event", self._desk_lyric_drag)
-        window.connect("draw", self._draw_desk_lyric)
-        window.show_all()
-        return window
+    def _desk_lyric_alive(self):
+        proc = getattr(self, "_desk_lyric_proc", None)
+        return proc is not None and proc.poll() is None
 
-    def _draw_desk_lyric(self, window, ctx):
-        width, height = window.get_allocated_width(), window.get_allocated_height()
-        ctx.set_source_rgba(0.12, 0.12, 0.14, 0.62)
-        ctx.arc(16, 16, 16, 3.1416, 4.7124)
-        ctx.arc(width - 16, 16, 16, 4.7124, 6.2832)
-        ctx.arc(width - 16, height - 16, 16, 0, 1.5708)
-        ctx.arc(16, height - 16, 16, 1.5708, 3.1416)
-        ctx.close_path()
-        ctx.fill()
+    def _launch_desk_lyric(self):
+        if self._desk_lyric_alive():
+            return
+        self._desk_lyric_proc = _launch_desk_lyric()
+
+    def _close_desk_lyric(self):
+        proc = getattr(self, "_desk_lyric_proc", None)
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        self._desk_lyric_proc = None
+
+    def _lyric_span(self, elapsed):
+        """当前句、已唱比例。时间戳按字头写，不再提前，避免歌词快半拍。"""
+        lines = self.lyrics or []
+        heard = max(0, int(elapsed))
+        index = -1
+        for i, (ms, text) in enumerate(lines):
+            if text and ms <= heard:
+                index = i
+            elif ms > heard:
+                break
+        if index < 0:
+            title = (self.current_song or {}).get("name") or ""
+            return title, 0, 1
+        start, text = lines[index]
+        end = lines[index + 1][0] if index + 1 < len(lines) else start + 4000
+        return text, start, end
+
+    def _publish_desk_lyric(self, elapsed=0):
+        """只在换句时写文件。颜色进度由歌词窗口按时间自己往前走，不再每拍读盘。"""
+        line, start, end = self._lyric_span(elapsed)
+        playing = bool(self.player.playing())
+        payload = {
+            "line": line,
+            "start": int(start),
+            "end": int(end),
+            "position": int(elapsed),
+            "at": time.time(),
+            "playing": playing,
+        }
+        previous = getattr(self, "_desk_lyric_payload", None)
+        if (
+            previous
+            and previous.get("line") == line
+            and previous.get("playing") == playing
+            and abs(previous.get("position", 0) - int(elapsed)) < 800
+        ):
+            return
+        self._desk_lyric_payload = payload
+        try:
+            os.makedirs(DATA_DIR, exist_ok=True)
+            tmp = LYRIC_PATH + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, ensure_ascii=False)
+            os.replace(tmp, LYRIC_PATH)
+        except OSError:
+            pass
+
+    def _on_player_state(self, _want):
+        self._sync_play_icon()
         return False
 
-    def _desk_lyric_press(self, window, event):
-        if event.type == Gdk.EventType._2BUTTON_PRESS:
-            window.hide()
-            return True
-        window._drag = (event.x_root, event.y_root, *window.get_position())
-        return True
-
-    def _desk_lyric_drag(self, window, event):
-        if not (event.state & Gdk.ModifierType.BUTTON1_MASK) or not getattr(window, "_drag", None):
-            return False
-        x0, y0, wx, wy = window._drag
-        window.move(int(wx + event.x_root - x0), int(wy + event.y_root - y0))
-        return True
-
-    def _update_desk_lyric(self):
-        window = getattr(self, "_desk_lyric", None)
-        if window is None or not window.get_visible():
+    def _sync_play_icon(self):
+        playing = bool(self.current_song) and self.player.playing()
+        if getattr(self, "_play_shown", None) == playing and not getattr(self, "_play_hovered", False):
             return
-        line = "暂无歌词"
-        if self.lyrics:
-            heard = self.player.position_ms() + 450
-            for ms, text in self.lyrics:
-                if ms <= heard and text:
-                    line = text
-                elif ms > heard:
-                    break
-        elif self.current_song:
-            line = self.current_song.get("name") or line
-        window.lyric_label.set_text(line)
+        self._play_shown = playing
+        self._set_play_icon(playing)
 
     def _toggle(self):
         if self.player.playing():
             self.player.pause()
-            self._set_play_icon(False)
         elif self.player.paused() and self.current_song:
             self.player.resume()
-            self._set_play_icon(True)
         elif self.current_song and self._resume_at and not getattr(self, "_resume_used", False):
             # 启动时只恢复进度，不自动开播。第一次点播放才从上次的位置继续。
             self._resume_used = True
@@ -4027,7 +4245,7 @@ class AppWindow(Gtk.ApplicationWindow):
 
     def _play_hover(self, hovered):
         self._play_hovered = hovered
-        self._set_play_icon(self.player.playing())
+        self._sync_play_icon()
         return False
 
     def _set_play_icon(self, playing):
@@ -4064,13 +4282,18 @@ class AppWindow(Gtk.ApplicationWindow):
 
     def _tick(self):
         song = self.current_song
-        if song and (self.player.playing() or self.player.paused()) and not self.seeking:
-            if int(time.time() * 5) % 3 == 0:
-                self.player.refresh_clock()
-        if song and (self.player.playing() or self.player.paused()):
+        playing = bool(song) and self.player.playing()
+        paused = bool(song) and self.player.paused() and not playing
+        if song and (playing or paused) and not self.seeking:
+            self.player.refresh_clock()
+        self._sync_play_icon()
+        if song and (playing or paused):
             elapsed = self.player.position_ms()
-            total = self.player.duration_ms() or song.get("duration") or 1
-            if not self.seeking and total and elapsed > 0:
+            total = self.player.duration_ms() or song.get("duration") or getattr(self, "_resume_duration", 0) or 1
+            hold = getattr(self, "_seek_hold", 0)
+            if hold and abs(elapsed - hold) > 800 and self.seeking:
+                elapsed = hold
+            if not self.seeking and total and elapsed >= 0:
                 self.scale.set_value(min(1000, elapsed * 1000 / total))
             shown = elapsed
             if self.seeking:
@@ -4078,67 +4301,89 @@ class AppWindow(Gtk.ApplicationWindow):
                 self.scale.set_value(min(1000, shown * 1000 / total))
             self._place_time_pill(shown, total)
             self._highlight_lyric(shown if self.seeking else elapsed)
-            self._update_desk_lyric()
-        elif song and getattr(self, "_resume_at", 0) and not self.player.playing():
+            self._publish_desk_lyric(shown if self.seeking else elapsed)
+        elif song and getattr(self, "_resume_at", 0) and not playing:
             self._show_paused_progress()
+        return True
+
+    def _seek_fraction(self, scale, x):
+        trough = scale.get_range_rect()
+        span = max(1, trough.width)
+        return max(0.0, min(1.0, (x - trough.x) / span))
+
+    def _seek_apply(self, fraction):
+        total = self.player.duration_ms() or self.player.cached_dur or (self.current_song or {}).get("duration") or 0
+        if not total:
+            return False
+        target = total * max(0.0, min(1.0, fraction))
+        self.seeking = True
+        self._seek_hold = target
+        # 还没开播时，时钟每拍都会用上次的进度把滑块拉回去。点击后改记这个位置。
+        if self.player._want == "stopped":
+            self._resume_at = int(target)
+        self.scale.set_value(fraction * self.scale.get_adjustment().get_upper())
+        self.player.cached_pos = target
+        self.player.seek_ms(target)
+        self._place_time_pill(target, total)
+        self._seek_tries = 0
+        GLib.timeout_add(300, self._seek_done, target)
         return True
 
     def _seek_press(self, scale, event):
         """点在轨道任意位置就跳过去。只拖滑块时，细轨道几乎点不中。"""
         if event.button != 1:
             return False
-        total = self.player.duration_ms() or (self.current_song or {}).get("duration") or 0
-        width = scale.get_allocated_width()
-        if not total or width <= 1:
+        if not (self.player.duration_ms() or self.player.cached_dur or (self.current_song or {}).get("duration")):
             return False
-        fraction = max(0.0, min(1.0, event.x / width))
-        self.seeking = True
-        scale.set_value(fraction * scale.get_adjustment().get_upper())
-        self.player.seek_ms(total * fraction)
-        self._place_time_pill(total * fraction, total)
-        self._seek_hold = total * fraction
-        self._seek_tries = 0
-        GLib.timeout_add(250, self._seek_done, total * fraction)
+        # 滑块自己的拖动会在松手时发一次 change-value，值还是旧位置，进度就会弹回去。
+        # 点击和拖动都在这里接住，不再交给滑块。
+        self._seek_dragging = True
+        self._seek_apply(self._seek_fraction(scale, event.x))
+        return True
+
+    def _seek_motion(self, scale, event):
+        if not getattr(self, "_seek_dragging", False):
+            return False
+        if not (event.state & Gdk.ModifierType.BUTTON1_MASK):
+            return False
+        self._seek_apply(self._seek_fraction(scale, event.x))
         return True
 
     def _seek_change(self, scale, scroll, value):
-        # 按下和拖动都走这里。先锁住进度刷新，松手后再真正跳转。
-        self.seeking = True
-        upper = scale.get_adjustment().get_upper()
-        scale.set_value(max(0, min(upper, value)))
-        total = self.player.duration_ms() or (self.current_song or {}).get("duration") or 0
-        if total:
-            self._place_time_pill(total * scale.get_value() / 1000, total)
+        # 键盘和滚轮仍走这里。鼠标已经被按下事件接住，这里的值是松手时的旧位置。
+        if getattr(self, "_seek_dragging", False):
+            return True
+        upper = scale.get_adjustment().get_upper() or 1000
+        self._seek_apply(max(0.0, min(1.0, value / upper)))
         return True
 
-    def _seek_release(self, _scale, _event):
-        if not self.seeking:
+    def _seek_release(self, scale, event):
+        if not getattr(self, "_seek_dragging", False):
             return False
-        total = self.player.duration_ms() or (self.current_song or {}).get("duration") or 0
-        target = total * self.scale.get_value() / 1000 if total else 0
-        if total:
-            self.player.seek_ms(target)
-            self._seek_hold = target
-        self._seek_tries = 0
-        GLib.timeout_add(250, self._seek_done, target)
-        return False
+        self._seek_dragging = False
+        self._seek_apply(self._seek_fraction(scale, event.x))
+        return True
 
     def _seek_done(self, target):
+        if abs(getattr(self, "_seek_hold", 0) - target) > 400:
+            return False
         self._seek_tries = getattr(self, "_seek_tries", 0) + 1
         pos = self.player.position_ms()
-        close = abs(pos - target) < 4000 and pos > 0
-        if close or not (self.player.playing() or self.player.paused()) or self._seek_tries >= 8:
+        close = abs(pos - target) < 1500
+        if close or self._seek_tries >= 6:
             self.seeking = False
-            self._seek_hold = 0
+            if close:
+                self._seek_hold = 0
+                self.player._seek_target = None
             return False
+        self.player.seek_ms(target)
         return True
 
     def _highlight_lyric(self, elapsed):
         if not self.lyrics or not self.lyric_open:
             return
+        heard = max(0, int(elapsed))
         current = 0
-        # 歌词时间戳按字开始写，唱出来时已经过了这一拍。提前一点才跟声音齐。
-        heard = elapsed + 450
         for index, (ms, _line) in enumerate(self.lyrics):
             if ms <= heard:
                 current = index
@@ -4282,7 +4527,10 @@ class AppWindow(Gtk.ApplicationWindow):
             return
         path = os.path.join(DATA_DIR, "login-qr.png")
         os.makedirs(DATA_DIR, exist_ok=True)
-        subprocess.check_call(["qrencode", "-o", path, "-s", "8", "-m", "2", "https://music.163.com/login?codekey=" + key])
+        token = "".join(ch for ch in str(key) if ch.isalnum() or ch in "-_")
+        if token != str(key):
+            raise OSError("登录二维码无效")
+        subprocess.check_call(["qrencode", "-o", path, "-s", "8", "-m", "2", "https://music.163.com/login?codekey=" + token])
         GLib.idle_add(self._show_qr, key, cookie, path)
 
     def _show_qr(self, key, cookie, path):
@@ -4533,13 +4781,249 @@ class MusicApp(Gtk.Application):
     def quit_player(self):
         if self.win:
             self.win._save_state()
+            self.win._close_desk_lyric()
             self.win.player.stop()
         self.quit()
+
+
+def _ui_scale():
+    """UKUI 的界面缩放。Wayland 会自己乘上，XWayland 不会，歌词窗口要补上。"""
+    try:
+        value = float(Gio.Settings.new("org.ukui.SettingsDaemon.plugins.xsettings").get_double("scaling-factor"))
+    except (GLib.Error, TypeError, ValueError):
+        value = 1.0
+    return value if value >= 1 else 1.0
+
+
+def _launch_desk_lyric():
+    """桌面歌词单独走 XWayland。主进程留在 Wayland，窗口才能跟上系统缩放。"""
+    env = os.environ.copy()
+    env["GDK_BACKEND"] = "x11"
+    env.pop("WAYLAND_DISPLAY", None)
+    # 不设置 GDK_SCALE。整数倍缩放会把歌词窗口放大，并把它推进任务栏。
+    return subprocess.Popen([sys.executable, os.path.abspath(__file__), "--desk-lyric"], env=env)
+
+
+def _run_desk_lyric():
+    """无边框歌词层。悬停才显示半透明底和关闭按钮，松手后记住位置。"""
+    scale = _ui_scale()
+    window = Gtk.Window(type=Gtk.WindowType.TOPLEVEL)
+    window.set_title("桌面歌词")
+    titlebar = Gtk.Box()
+    titlebar.show()
+    window.set_titlebar(titlebar)
+    window.set_decorated(False)
+    window.set_skip_taskbar_hint(True)
+    window.set_skip_pager_hint(True)
+    window.set_keep_above(True)
+    window.set_accept_focus(True)
+    window.set_type_hint(Gdk.WindowTypeHint.UTILITY)
+    window.set_app_paintable(True)
+    width, height = 760, 64
+    window.set_size_request(width, height)
+    window.set_default_size(width, height)
+    window.set_resizable(False)
+    screen = window.get_screen()
+    visual = screen.get_rgba_visual()
+    if visual is not None:
+        window.set_visual(visual)
+    overlay = Gtk.Overlay()
+    plate = Gtk.Box()
+    plate.get_style_context().add_class("desk-lyric-plate")
+    plate.set_no_show_all(True)
+    plate.hide()
+    label = Gtk.Label()
+    label.set_ellipsize(Pango.EllipsizeMode.END)
+    label.set_margin_start(28)
+    label.set_margin_end(28)
+    label.set_margin_top(0)
+    label.set_margin_bottom(0)
+    label.set_size_request(width - 56, height)
+    label.set_sensitive(False)
+    window._line = ""
+    window._cut = -1
+    window._widths = {}
+    window._clock = {"line": "暂无歌词", "start": 0, "end": 1, "position": 0, "at": time.time(), "playing": False}
+    close = Gtk.Button(label="×")
+    close.set_relief(Gtk.ReliefStyle.NONE)
+    close.get_style_context().add_class("desk-lyric-close")
+    close.set_halign(Gtk.Align.END)
+    close.set_valign(Gtk.Align.START)
+    close.set_margin_top(6)
+    close.set_margin_end(6)
+    close.set_no_show_all(True)
+    close.hide()
+    overlay.add(plate)
+    overlay.add_overlay(label)
+    overlay.add_overlay(close)
+
+    def paint_line(text, fraction):
+        """已唱部分淡蓝，后面白色。唱到这个字的开头就变色，不等这个字唱完。"""
+        text = text or "暂无歌词"
+        fraction = max(0.0, min(0.999, fraction))
+        widths = window._widths.get(text) if text == window._line else None
+        if not widths or len(widths) != len(text) + 1:
+            layout = label.create_pango_layout(text)
+            layout.set_font_description(Pango.FontDescription("Sans Bold 18"))
+            widths = [0]
+            for index in range(1, len(text) + 1):
+                layout.set_text(text[:index], -1)
+                widths.append(layout.get_pixel_size()[0])
+            window._widths[text] = widths
+            if len(window._widths) > 8:
+                window._widths.pop(next(iter(window._widths)))
+        target = widths[-1] * fraction
+        cut = 0
+        for index, width in enumerate(widths):
+            if index and widths[index - 1] > target + 1:
+                break
+            cut = index
+        if text == window._line and cut == window._cut:
+            return
+        window._line = text
+        window._cut = cut
+        markup = (
+            f'<span font="Sans Bold 18" foreground="#9EC7F2">{GLib.markup_escape_text(text[:cut])}</span>'
+            f'<span font="Sans Bold 18" foreground="#FFFFFF">{GLib.markup_escape_text(text[cut:])}</span>'
+        )
+        label.set_markup(markup)
+    window.add(overlay)
+    window.add_events(
+        Gdk.EventMask.BUTTON_PRESS_MASK
+        | Gdk.EventMask.BUTTON_RELEASE_MASK
+        | Gdk.EventMask.POINTER_MOTION_MASK
+        | Gdk.EventMask.ENTER_NOTIFY_MASK
+        | Gdk.EventMask.LEAVE_NOTIFY_MASK
+    )
+    provider = Gtk.CssProvider()
+    provider.load_from_data(CSS.replace("{RED}", RED).encode())
+    Gtk.StyleContext.add_provider_for_screen(
+        screen, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
+    )
+    window._placed = False
+    window._drag = None
+
+    def saved_position():
+        try:
+            payload = json.loads(open(LYRIC_POS_PATH, encoding="utf-8").read())
+            return int(payload["x"]), int(payload["y"])
+        except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+            return None
+
+    def remember():
+        x, y = window.get_position()
+        try:
+            os.makedirs(DATA_DIR, exist_ok=True)
+            tmp = LYRIC_POS_PATH + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as handle:
+                json.dump({"x": int(x), "y": int(y)}, handle)
+            os.replace(tmp, LYRIC_POS_PATH)
+        except OSError:
+            pass
+
+    def place(*_args):
+        if window._placed:
+            return False
+        saved = saved_position()
+        if saved is not None:
+            window.move(*saved)
+        else:
+            try:
+                panel = int(Gio.Settings.new("org.ukui.panel.settings").get_int("panelsize") or 48)
+            except (GLib.Error, TypeError, ValueError):
+                panel = 48
+            screen_w, screen_h = 1646, 1029
+            monitor = window.get_display().get_monitor(0)
+            if monitor is not None:
+                geom = monitor.get_geometry()
+                logical_w = geom.width / max(scale, 1)
+                if 800 < logical_w < 2200:
+                    screen_w, screen_h = logical_w, geom.height / max(scale, 1)
+            window.move(int(max(0, (screen_w - width) // 2)), int(max(0, screen_h - panel - height - 8)))
+        window.resize(width, height)
+        window.set_size_request(width, height)
+        window._placed = True
+        return False
+
+    def show_chrome(shown):
+        if shown:
+            plate.show()
+            close.show()
+        else:
+            plate.hide()
+            close.hide()
+
+    def press(widget, event):
+        if event.button != 1 or event.type == Gdk.EventType._2BUTTON_PRESS:
+            return True
+        widget._drag = (event.x_root, event.y_root, *widget.get_position())
+        widget._placed = True
+        seat = widget.get_display().get_default_seat()
+        if seat is not None and window.get_window() is not None:
+            seat.grab(window.get_window(), Gdk.SeatCapabilities.POINTER, False, None, event, None)
+        return True
+
+    def release(widget, _event):
+        if widget._drag is not None:
+            remember()
+        widget._drag = None
+        seat = widget.get_display().get_default_seat()
+        if seat is not None:
+            seat.ungrab()
+        return True
+
+    def motion(widget, event):
+        drag = widget._drag
+        if not drag:
+            show_chrome(True)
+            return False
+        x0, y0, wx, wy = drag
+        widget.move(int(wx + event.x_root - x0), int(wy + event.y_root - y0))
+        return True
+
+    def refresh():
+        try:
+            payload = json.loads(open(LYRIC_PATH, encoding="utf-8").read())
+            window._clock = payload
+        except (OSError, json.JSONDecodeError):
+            payload = window._clock
+        return True
+
+    def advance():
+        """颜色在本进程里按时间往前走。读文件只负责换句，避免每个字都等一次磁盘。"""
+        clock = window._clock or {}
+        line = clock.get("line") or "暂无歌词"
+        start = int(clock.get("start") or 0)
+        end = int(clock.get("end") or start + 1)
+        position = int(clock.get("position") or 0)
+        if clock.get("playing"):
+            position += int((time.time() - float(clock.get("at") or time.time())) * 1000)
+        span = max(1, end - start)
+        fraction = max(0.0, min(1.0, (position - start) / span))
+        paint_line(line, fraction)
+        return True
+
+    close.connect("clicked", lambda *_: (window.hide(), Gtk.main_quit()))
+    window.connect("realize", place)
+    window.connect("enter-notify-event", lambda *_: show_chrome(True))
+    window.connect("leave-notify-event", lambda *_: show_chrome(False))
+    window.connect("button-press-event", press)
+    window.connect("button-release-event", release)
+    window.connect("motion-notify-event", motion)
+    window.show_all()
+    close.hide()
+    plate.hide()
+    GLib.timeout_add(1000, refresh)
+    GLib.timeout_add(80, advance)
+    Gtk.main()
 
 
 def main():
     os.makedirs(DATA_DIR, exist_ok=True)
     os.chmod(DATA_DIR, 0o700)
+    if "--desk-lyric" in sys.argv:
+        _run_desk_lyric()
+        return
     raise SystemExit(MusicApp().run([os.path.abspath(__file__)]))
 
 

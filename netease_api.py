@@ -35,9 +35,13 @@ QUALITIES = (
     ("lossless", "无损", "FLAC"),
     ("hires", "Hi-Res", "高解析"),
     ("jyeffect", "高清臻音", "会员"),
-    ("sky", "沉浸环绕", "会员"),
+    ("sky", "臻音全景声", "SVIP"),
     ("jymaster", "超清母带", "SVIP"),
 )
+# 请求参数和菜单档位不是同一个字符串。沉浸环绕要带声道，否则服务端会降成高清臻音。
+QUALITY_REQUEST = {
+    "sky": {"level": "sky", "encodeType": "flac", "immerseType": "ste"},
+}
 QUALITY_LABEL = {key: f"{name} {hint}" for key, name, hint in QUALITIES}
 
 
@@ -209,11 +213,9 @@ def song_url(song_id, level="lossless", cookie=""):
     """按音质档请求播放地址。level 见 QUALITIES。"""
     if level not in QUALITY_LABEL:
         level = "lossless"
-    payload = request(
-        "/api/song/enhance/player/url/v1",
-        {"ids": f"[{int(song_id)}]", "level": level, "encodeType": "flac"},
-        cookie=cookie,
-    )
+    body = {"ids": f"[{int(song_id)}]", "level": level, "encodeType": "flac"}
+    body.update(QUALITY_REQUEST.get(level) or {})
+    payload = request("/api/song/enhance/player/url/v1", body, cookie=cookie)
     item = (payload.get("data") or [None])[0] or {}
     if not item.get("url"):
         # 新接口没给地址时，退回旧接口，避免整首直接失败。
