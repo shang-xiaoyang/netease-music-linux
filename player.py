@@ -11,6 +11,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import subprocess
 import threading
 import time
@@ -67,8 +68,8 @@ window {{
     font-family: "Noto Sans CJK SC";
 }}
 .side {{
-    background: #FFFFFF;
-    border-right: 1px solid #ECECEE;
+    background: #F4F4F6;
+    border-right: 1px solid #E6E6EA;
 }}
 .brand {{
     font-size: 14px;
@@ -76,9 +77,9 @@ window {{
     color: #222;
 }}
 .side-row {{
-    border-radius: 8px;
-    margin: 1px 10px;
-    min-height: 34px;
+    border-radius: 6px;
+    margin: 0 8px;
+    min-height: 30px;
     padding: 0 8px;
     color: #333;
     background: transparent;
@@ -88,9 +89,14 @@ window {{
 }}
 .side-row label {{
     color: #333;
+    font-size: 13px;
 }}
 .side-row:hover {{
-    background: #F3F3F5;
+    background: #D6E8FA;
+}}
+.side-row:hover image,
+.side-row:hover label {{
+    color: #1F4E79;
 }}
 .side-row.current,
 .side-row.current image,
@@ -100,8 +106,8 @@ window {{
 }}
 .section {{
     color: #9A9AA0;
-    font-size: 12px;
-    padding: 16px 18px 4px 18px;
+    font-size: 11px;
+    padding: 12px 16px 2px 16px;
 }}
 .page {{
     background: #F5F5F7;
@@ -194,27 +200,82 @@ window {{
     background: @theme_bg_color;
     color: @theme_fg_color;
     border-top: 1px solid @borders;
-    padding: 6px 10px;
+    padding: 0;
+}}
+.progress-row {{
+    min-height: 3px;
+    padding: 0;
+    margin: 0;
 }}
 .progress-row scale {{
     min-width: 1px;
-    padding-top: 0;
-    padding-bottom: 0;
+    min-height: 12px;
+    margin: -5px 0 0;
+    padding: 0;
 }}
 .progress-row scale trough {{
     min-height: 3px;
-    border-radius: 2px;
+    border-radius: 0;
+    background: #F0D5D8;
 }}
 .progress-row scale highlight {{
-    border-radius: 2px;
+    border-radius: 0;
     background: {RED};
 }}
 .progress-row scale slider {{
-    min-width: 10px;
-    min-height: 10px;
-    margin: -4px;
+    min-width: 12px;
+    min-height: 12px;
+    margin: -5px 0;
     border-radius: 8px;
-    background: {RED};
+    background: #FFFFFF;
+    border: 2px solid {RED};
+}}
+.player-controls {{
+    padding: 2px 12px 4px;
+}}
+.desk-lyric {{
+    color: #FFFFFF;
+    font-size: 22px;
+    font-weight: 600;
+}}
+.time-pill {{
+    background: #FFFFFF;
+    color: #333333;
+    border-radius: 12px;
+    padding: 3px 10px;
+    font-size: 12px;
+}}
+.collect-popover {{
+    background: #FFFFFF;
+    border-radius: 12px;
+}}
+.collect-title {{
+    font-size: 13px;
+    font-weight: 700;
+    color: #2C2C34;
+}}
+.collect-tab {{
+    color: #8E8E93;
+    font-size: 12px;
+}}
+.collect-tab.active {{
+    color: #2C2C34;
+    font-weight: 600;
+}}
+.collect-name {{
+    color: #2C2C34;
+    font-size: 13px;
+}}
+.collect-count {{
+    color: #8E8E93;
+    font-size: 11px;
+}}
+.collect-plus {{
+    background: #F2F2F4;
+    color: #8E8E93;
+    border-radius: 6px;
+    font-size: 18px;
+    font-weight: 500;
 }}
 .comment-page {{
     background: #FFFFFF;
@@ -243,25 +304,24 @@ window {{
     font-size: 12px;
 }}
 button.play-main {{
-    border-radius: 18px;
+    border-radius: 17px;
     min-width: 34px;
     min-height: 34px;
     padding: 0;
-    background: transparent;
-    color: @theme_fg_color;
-    border: 1.5px solid alpha(@theme_fg_color, 0.55);
+    background: {RED};
+    color: #FFFFFF;
+    border: none;
     box-shadow: none;
 }}
 button.play-main:hover {{
-    background: alpha({RED}, 0.12);
-    color: {RED};
-    border-color: {RED};
+    background: #D93636;
+    color: #FFFFFF;
 }}
 button.transport {{
-    border-radius: 16px;
-    min-width: 30px;
-    min-height: 30px;
-    padding: 2px;
+    border-radius: 12px;
+    min-width: 24px;
+    min-height: 24px;
+    padding: 0;
     background: transparent;
     color: @theme_fg_color;
     border: none;
@@ -273,10 +333,10 @@ button.transport:hover image {{
     color: {RED};
 }}
 button.icon-btn {{
-    border-radius: 8px;
-    min-width: 32px;
-    min-height: 32px;
-    padding: 4px;
+    border-radius: 6px;
+    min-width: 24px;
+    min-height: 24px;
+    padding: 2px;
     background: transparent;
     color: @theme_fg_color;
     border: none;
@@ -296,12 +356,13 @@ button.flat {{
     box-shadow: none;
 }}
 button.quality-btn {{
-    background: alpha(@theme_fg_color, 0.06);
-    color: @theme_fg_color;
+    background: #F2F2F4;
+    color: #333333;
     border: none;
-    border-radius: 11px;
-    padding: 0 10px;
+    border-radius: 10px;
+    padding: 0 8px;
     min-height: 22px;
+    min-width: 52px;
     font-size: 11px;
     box-shadow: none;
 }}
@@ -450,6 +511,7 @@ menu, .menu {{
 menu menuitem, .menu menuitem, menuitem, menuitem label {{
     color: #222222;
     background: #FFFFFF;
+    font-size: 13px;
 }}
 menu menuitem:hover, .menu menuitem:hover, menuitem:hover, menuitem:hover label {{
     background: #F3F3F5;
@@ -513,64 +575,120 @@ def _fixed_icon(draw, size=16):
     return _pixbuf_from_surface(surface)
 
 
+def _screen_scale():
+    """2 倍屏上 16 逻辑像素要画 32 物理像素。先缩到 16 再显示，主题图标不会糊，自绘图会糊。"""
+    try:
+        return max(1, int(round(Gdk.Screen.get_default().get_monitor_scale_factor(0))))
+    except Exception:
+        return 2
+
+
 def _symbolic_pixbuf(draw, size=16):
-    """侧栏等直接贴 pixbuf 的地方仍按逻辑尺寸出图。"""
-    scale = 4
-    canvas = max(1, int(size)) * scale
+    """按逻辑像素出图。GTK 的 set_pixel_size 压不住位图，按屏幕倍率画会被放大。"""
+    scale = 1
+    logical = max(1, int(size))
+    canvas = logical * scale
     surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, canvas, canvas)
     ctx = cairo.Context(surface)
     ctx.set_line_join(cairo.LINE_JOIN_ROUND)
     ctx.set_line_cap(cairo.LINE_CAP_ROUND)
     ctx.set_source_rgba(0.16, 0.16, 0.18, 1)
     ctx.scale(scale, scale)
-    draw(ctx, size)
-    large = _pixbuf_from_surface(surface)
-    if size == canvas:
-        return large
-    return large.scale_simple(int(size), int(size), GdkPixbuf.InterpType.BILINEAR)
+    draw(ctx, logical)
+    return _pixbuf_from_surface(surface)
 
 
 def comment_icon(size=16):
-    """细线圆角气泡，线宽和下载同一档，尾巴收到左下角。"""
+    """气泡收在画布内。尾巴不能画到 16 之外，否则按钮里会被裁掉。"""
     def draw(ctx, size):
-        ctx.set_line_width(max(1.15, size / 14))
-        scale = size / 16
-        ctx.scale(scale, scale)
-        x, y, width, height, radius = 2.2, 2.15, 11.6, 7.7, 2.05
+        ctx.set_line_width(1.15)
+        ctx.set_source_rgba(0.16, 0.16, 0.18, 0.85)
+        x, y, width, height, radius = 2.4, 2.6, 11.2, 7.2, 2.2
         ctx.new_sub_path()
         ctx.arc(x + width - radius, y + radius, radius, -1.5708, 0)
         ctx.arc(x + width - radius, y + height - radius, radius, 0, 1.5708)
-        ctx.line_to(6.7, y + height)
-        ctx.line_to(4.35, 13.7)
-        ctx.line_to(5.05, y + height)
+        ctx.line_to(7.2, y + height)
+        ctx.line_to(4.6, 14.2)
+        ctx.line_to(5.6, y + height)
         ctx.arc(x + radius, y + height - radius, radius, 1.5708, 3.1416)
         ctx.arc(x + radius, y + radius, radius, 3.1416, 4.7124)
         ctx.close_path()
         ctx.stroke()
 
-    return _fixed_icon(draw, size)
+    return _symbolic_pixbuf(draw, size)
 
 
 def heart_icon(size=16, filled=False):
-    """爱心按 16px 光学尺寸画。喜欢后填实心红，未喜欢保持细线。"""
+    """爱心按评论、收藏同一光学尺寸画。SVG 几乎铺满 16 格，贴上去会显大。"""
     def draw(ctx, size):
-        ctx.set_line_width(max(1.15, size / 14))
-        scale = size / 16
-        ctx.scale(scale, scale)
-        ctx.move_to(8.0, 13.35)
-        ctx.curve_to(7.6, 13.0, 2.05, 9.25, 2.05, 5.75)
-        ctx.curve_to(2.05, 3.7, 3.5, 2.35, 5.3, 2.35)
-        ctx.curve_to(6.5, 2.35, 7.5, 3.0, 8.0, 3.95)
-        ctx.curve_to(8.5, 3.0, 9.5, 2.35, 10.7, 2.35)
-        ctx.curve_to(12.5, 2.35, 13.95, 3.7, 13.95, 5.75)
-        ctx.curve_to(13.95, 9.25, 8.4, 13.0, 8.0, 13.35)
+        ctx.set_line_width(1.15)
+        ctx.set_source_rgba(0.925, 0.255, 0.255, 1) if filled else ctx.set_source_rgba(0.16, 0.16, 0.18, 0.85)
+        ctx.move_to(8.0, 12.7)
+        ctx.curve_to(7.6, 12.35, 3.0, 9.15, 3.0, 6.35)
+        ctx.curve_to(3.0, 4.55, 4.25, 3.45, 5.75, 3.45)
+        ctx.curve_to(6.7, 3.45, 7.45, 4.0, 8.0, 4.9)
+        ctx.curve_to(8.55, 4.0, 9.3, 3.45, 10.25, 3.45)
+        ctx.curve_to(11.75, 3.45, 13.0, 4.55, 13.0, 6.35)
+        ctx.curve_to(13.0, 9.15, 8.4, 12.35, 8.0, 12.7)
         ctx.close_path()
         if filled:
             ctx.fill()
         else:
             ctx.stroke()
 
-    return _fixed_icon(draw, size)
+    return _symbolic_pixbuf(draw, size)
+
+
+def add_icon(size=16):
+    """收藏：方框加号，外框和评论气泡同一留白。"""
+    def draw(ctx, size):
+        ctx.set_line_width(1.15)
+        ctx.set_source_rgba(0.16, 0.16, 0.18, 0.85)
+        radius = 1.5
+        x, y, width = 3.1, 3.1, 9.8
+        ctx.new_sub_path()
+        ctx.arc(x + width - radius, y + radius, radius, -1.5708, 0)
+        ctx.arc(x + width - radius, y + width - radius, radius, 0, 1.5708)
+        ctx.arc(x + radius, y + width - radius, radius, 1.5708, 3.1416)
+        ctx.arc(x + radius, y + radius, radius, 3.1416, 4.7124)
+        ctx.close_path()
+        ctx.stroke()
+        ctx.move_to(8, 5.5)
+        ctx.line_to(8, 10.5)
+        ctx.move_to(5.5, 8)
+        ctx.line_to(10.5, 8)
+        ctx.stroke()
+
+    return _symbolic_pixbuf(draw, size)
+
+
+def more_icon(size=16):
+    def draw(ctx, size):
+        ctx.set_source_rgba(0.16, 0.16, 0.18, 0.85)
+        for x in (3.3, 8.0, 12.7):
+            ctx.arc(x, 8, 1.05, 0, 6.2832)
+            ctx.fill()
+
+    return _symbolic_pixbuf(draw, size)
+
+
+def play_glyph(size=20, playing=False):
+    """播放条上的三角和暂停条。按 16 像素图形等比放到目标尺寸，深色，白底上也能看见。"""
+    def draw(ctx, size):
+        ctx.set_source_rgba(0.12, 0.12, 0.14, 1)
+        ctx.scale(size / 16.0, size / 16.0)
+        if playing:
+            ctx.rectangle(4.3, 3.2, 2.3, 9.6)
+            ctx.rectangle(9.4, 3.2, 2.3, 9.6)
+            ctx.fill()
+            return
+        ctx.move_to(5.2, 2.8)
+        ctx.line_to(12.6, 8.0)
+        ctx.line_to(5.2, 13.2)
+        ctx.close_path()
+        ctx.fill()
+
+    return _symbolic_pixbuf(draw, size)
 
 
 def note_icon(size=16):
@@ -737,6 +855,7 @@ class Player:
             raise OSError("播放地址不被允许")
         self.playbin.set_state(Gst.State.NULL)
         self.playbin.set_property("uri", url)
+        self.playbin.set_property("volume", 1.0)
         self.playbin.set_state(Gst.State.PLAYING)
 
     def stop(self):
@@ -819,7 +938,8 @@ class Player:
         )
 
     def set_volume(self, value):
-        self.playbin.set_property("volume", max(0.0, min(1.0, float(value))))
+        # 播放器增益保持 1。滑条改的是系统音量，不在软件里再乘一次。
+        self.playbin.set_property("volume", 1.0)
 
 
 class AppWindow(Gtk.ApplicationWindow):
@@ -852,6 +972,7 @@ class AppWindow(Gtk.ApplicationWindow):
         self._resume_used = False
         self.quality = self._load_quality()
         self._applied_quality = self.quality
+        self._quality_options = [key for key, _name, _hint in api.QUALITIES]
         self.seeking = False
         self.lyric_open = False
         self.nav_buttons = []
@@ -932,8 +1053,8 @@ class AppWindow(Gtk.ApplicationWindow):
 
         self.side = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         self.side.get_style_context().add_class("side")
-        self.side.set_size_request(210, -1)
-        self.nav_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
+        self.side.set_size_request(196, -1)
+        self.nav_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         self.nav_box.set_margin_top(8)
         scroll = Gtk.ScrolledWindow()
         scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
@@ -1125,17 +1246,17 @@ class AppWindow(Gtk.ApplicationWindow):
         names.pack_start(title_click, False, False, 0)
         names.pack_start(self.artist_btn, False, False, 0)
         self.like_btn = self._icon_button(heart_icon(16), self._toggle_like, "icon-btn")
-        self.like_btn.set_tooltip_text("加入或移出我喜欢的音乐")
+        self.like_btn.set_tooltip_text("喜欢")
         self.comment_btn = self._icon_button(comment_icon(16), lambda: self._open_comments(), "icon-btn")
-        self.comment_btn.set_tooltip_text("查看评论")
-        self.download_btn = self._icon_button("folder-download-symbolic", lambda: self._enqueue_download(self.current_song), "icon-btn")
-        self.download_btn.set_tooltip_text("按当前音质下载")
-        song_actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
-        song_actions.pack_start(self.comment_btn, False, False, 0)
+        self.comment_btn.set_tooltip_text("评论")
+        self.collect_btn = self._icon_button(add_icon(16), self._toggle_collect, "icon-btn")
+        self.collect_btn.set_tooltip_text("收藏到歌单")
+        song_actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         song_actions.pack_start(self.like_btn, False, False, 0)
-        song_actions.pack_start(self.download_btn, False, False, 0)
+        song_actions.pack_start(self.comment_btn, False, False, 0)
+        song_actions.pack_start(self.collect_btn, False, False, 0)
         meta = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-        meta.set_size_request(168, -1)
+        meta.set_size_request(220, -1)
         meta.pack_start(names, False, False, 0)
         meta.pack_start(song_actions, False, False, 0)
 
@@ -1150,14 +1271,17 @@ class AppWindow(Gtk.ApplicationWindow):
         self.scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 1000, 1)
         self.scale.set_draw_value(False)
         self.scale.set_hexpand(True)
-        self.scale.set_size_request(80, 18)
+        self.scale.set_size_request(80, 14)
         self.scale.set_valign(Gtk.Align.CENTER)
         self.scale.set_can_focus(False)
         self.scale.set_tooltip_text("点击或拖动进度条跳转")
         self.scale.connect("change-value", self._seek_change)
+        self.scale.connect("button-press-event", self._seek_press)
         self.scale.connect("button-release-event", self._seek_release)
         self.time_label = Gtk.Label(label="00:00 / 00:00")
-        self.time_label.get_style_context().add_class("dim")
+        self.time_label.get_style_context().add_class("time-pill")
+        self.time_label.set_no_show_all(True)
+        self.time_label.hide()
         self.mode_btn = self._icon_button("media-playlist-repeat-symbolic", self._cycle_mode, "icon-btn")
         self._apply_mode_button()
         self.queue_btn = self._icon_button("view-list-symbolic", self._show_queue, "icon-btn")
@@ -1165,7 +1289,15 @@ class AppWindow(Gtk.ApplicationWindow):
         self.quality_btn = Gtk.MenuButton(label=self._quality_short())
         self.quality_btn.get_style_context().add_class("quality-btn")
         self.quality_btn.set_relief(Gtk.ReliefStyle.NONE)
+        self.quality_btn.set_valign(Gtk.Align.CENTER)
+        self.quality_btn.set_size_request(64, 24)
         self.quality_btn.set_tooltip_text("播放音质")
+        self.desk_lyric_btn = Gtk.Button(label="词")
+        self.desk_lyric_btn.get_style_context().add_class("icon-btn")
+        self.desk_lyric_btn.set_relief(Gtk.ReliefStyle.NONE)
+        self.desk_lyric_btn.set_valign(Gtk.Align.CENTER)
+        self.desk_lyric_btn.set_tooltip_text("桌面歌词")
+        self.desk_lyric_btn.connect("clicked", lambda *_: self._toggle_desk_lyric())
 
         self.prev_btn = self._icon_button("media-skip-backward-symbolic", self._prev, "transport")
         self.next_btn = self._icon_button("media-skip-forward-symbolic", self._next, "transport")
@@ -1173,14 +1305,18 @@ class AppWindow(Gtk.ApplicationWindow):
         self.next_btn.set_tooltip_text("下一首")
 
         self.volume_btn = self._icon_button("audio-volume-high-symbolic", self._toggle_volume, "icon-btn")
-        self.volume_btn.set_tooltip_text("音量")
+        self.volume_btn.set_tooltip_text("系统音量")
+        self.more_btn = self._icon_button(more_icon(16), self._popup_more, "icon-btn")
+        self.more_btn.set_tooltip_text("更多")
         self.volume = Gtk.Scale.new_with_range(Gtk.Orientation.VERTICAL, 0, 1, 0.01)
         self.volume.set_inverted(True)
         self.volume.set_draw_value(False)
         self.volume.set_size_request(28, 110)
-        self.volume.set_value(self._load_volume())
+        self._volume_ready = False
+        self.volume.set_value(self._system_volume())
+        self._volume_ready = True
         self.volume.connect("value-changed", self._on_volume)
-        self.player.set_volume(self.volume.get_value())
+        self.player.set_volume(1.0)
         self._sync_volume_icon(self.volume.get_value())
         volume_pop = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         volume_pop.set_margin_top(8)
@@ -1194,23 +1330,37 @@ class AppWindow(Gtk.ApplicationWindow):
         self.volume_popup.set_relative_to(self.volume_btn)
         self.volume_popup.set_position(Gtk.PositionType.TOP)
 
-        progress = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        progress = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
         progress.get_style_context().add_class("progress-row")
         progress.pack_start(self.scale, True, True, 0)
+        self.time_label.set_no_show_all(True)
         progress.pack_start(self.time_label, False, False, 0)
+        self._progress_overlay = progress
 
-        bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        controls = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        controls.get_style_context().add_class("player-controls")
+        controls.pack_start(self.cover_btn, False, False, 0)
+        controls.pack_start(meta, False, False, 0)
+        center = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        center.set_halign(Gtk.Align.CENTER)
+        center.set_hexpand(True)
+        center.pack_start(self.mode_btn, False, False, 0)
+        center.pack_start(self.prev_btn, False, False, 0)
+        center.pack_start(self.play_btn, False, False, 0)
+        center.pack_start(self.next_btn, False, False, 0)
+        center.pack_start(self.queue_btn, False, False, 0)
+        controls.pack_start(center, True, True, 0)
+        right = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
+        right.pack_start(self.quality_btn, False, False, 0)
+        right.pack_start(self.desk_lyric_btn, False, False, 0)
+        right.pack_start(self.volume_btn, False, False, 0)
+        right.pack_start(self.more_btn, False, False, 0)
+        controls.pack_end(right, False, False, 0)
+
+        bar = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         bar.get_style_context().add_class("player-bar")
-        bar.pack_start(self.prev_btn, False, False, 0)
-        bar.pack_start(self.play_btn, False, False, 0)
-        bar.pack_start(self.next_btn, False, False, 0)
-        bar.pack_start(self.cover_btn, False, False, 4)
-        bar.pack_start(meta, False, False, 0)
-        bar.pack_start(progress, True, True, 6)
-        bar.pack_end(self.quality_btn, False, False, 0)
-        bar.pack_end(self.queue_btn, False, False, 0)
-        bar.pack_end(self.mode_btn, False, False, 0)
-        bar.pack_end(self.volume_btn, False, False, 0)
+        bar.pack_start(progress, False, False, 0)
+        bar.pack_start(controls, False, False, 0)
 
         self.status = Gtk.Label(label="", xalign=0)
         self.status.set_margin_start(16)
@@ -1276,15 +1426,77 @@ class AppWindow(Gtk.ApplicationWindow):
         self._hide_queue()
         return False
 
-    def _load_volume(self):
+    def _pulse_stream(self):
+        """只找本播放器的 PulseAudio 播放流，不改整机输出。"""
+        try:
+            out = subprocess.check_output(
+                ["pactl", "list", "sink-inputs"],
+                stderr=subprocess.DEVNULL,
+                timeout=2,
+                text=True,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        current = None
+        matched = None
+        for line in out.splitlines():
+            head = line.strip()
+            if head.startswith("Sink Input #"):
+                current = head.split("#", 1)[1].strip()
+            elif current and "application.process.id" in head and f"= \"{os.getpid()}\"" in head:
+                matched = current
+        return matched
+
+    def _system_volume(self):
+        """读本播放流的音量。还没出声时用上次记住的值。"""
+        stream = self._pulse_stream()
+        if stream:
+            try:
+                out = subprocess.check_output(
+                    ["pactl", "list", "sink-inputs"],
+                    stderr=subprocess.DEVNULL,
+                    timeout=2,
+                    text=True,
+                )
+                block = []
+                capture = False
+                for line in out.splitlines():
+                    if line.strip().startswith("Sink Input #"):
+                        capture = line.strip().endswith("#" + stream)
+                    if capture:
+                        block.append(line)
+                match = re.search(r"(\d+)%", "\n".join(block))
+                if match:
+                    return max(0.0, min(1.0, int(match.group(1)) / 100))
+            except (OSError, subprocess.SubprocessError, ValueError):
+                pass
         try:
             return max(0.0, min(1.0, float(open(VOLUME_PATH, encoding="utf-8").read().strip())))
         except (OSError, ValueError):
             return 0.8
 
-    def _on_volume(self, _scale, value):
-        self.player.set_volume(value)
+    def _on_volume(self, scale):
+        # value-changed 只传滑条。多写一个参数时，拖动会直接报错，系统音量不会变。
+        if not getattr(self, "_volume_ready", False):
+            return
+        value = scale.get_value()
+        self.player.set_volume(1.0)
         self._sync_volume_icon(value)
+        percent = f"{int(round(max(0.0, min(1.0, value)) * 100))}%"
+        stream = self._pulse_stream()
+        if stream:
+            try:
+                subprocess.check_call(
+                    ["pactl", "set-sink-input-volume", stream, percent],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=2,
+                )
+            except (OSError, subprocess.SubprocessError):
+                self._status("播放音量没有改成功")
+        self._remember_volume(value)
+
+    def _remember_volume(self, value):
         try:
             os.makedirs(DATA_DIR, exist_ok=True)
             with open(VOLUME_PATH, "w", encoding="utf-8") as handle:
@@ -1569,12 +1781,201 @@ class AppWindow(Gtk.ApplicationWindow):
             pixbuf = heart_icon(16, filled=liked)
             if liked:
                 pixbuf = _tint_pixbuf(pixbuf, 0.925, 0.255, 0.255)
-            image.set_pixel_size(16)
+            image.set_pixel_size(pixbuf.get_width())
             image.set_from_pixbuf(pixbuf)
             for state in (Gtk.StateFlags.NORMAL, Gtk.StateFlags.PRELIGHT, Gtk.StateFlags.ACTIVE):
                 image.override_color(state, None)
-        self.like_btn.set_tooltip_text("移出我喜欢的音乐" if liked else "加入我喜欢的音乐")
+        self.like_btn.set_tooltip_text("取消喜欢" if liked else "喜欢")
         return False
+
+    def _toggle_collect(self):
+        song = self.current_song
+        if not song or not song.get("id"):
+            self._status("还没有正在播放的歌曲")
+            return
+        if not self.cookie:
+            self._status("请先登录再收藏")
+            return
+        popover = getattr(self, "_collect_popover", None)
+        if popover is not None and popover.get_visible():
+            popover.popdown()
+            return
+        self._show_collect(song)
+
+    def _show_collect(self, song):
+        popover = Gtk.Popover()
+        popover.get_style_context().add_class("collect-popover")
+        popover.set_relative_to(self.collect_btn)
+        popover.set_position(Gtk.PositionType.TOP)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        box.set_size_request(360, 420)
+        box.set_margin_start(16)
+        box.set_margin_end(16)
+        box.set_margin_top(12)
+        box.set_margin_bottom(12)
+        title = Gtk.Label(label="收藏到歌单", xalign=0.5)
+        title.get_style_context().add_class("collect-title")
+        box.pack_start(title, False, False, 0)
+        tabs = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=16)
+        default_tab = Gtk.Label(label="默认排序")
+        default_tab.get_style_context().add_class("collect-tab")
+        default_tab.get_style_context().add_class("active")
+        often_tab = Gtk.Label(label="常用优先")
+        often_tab.get_style_context().add_class("collect-tab")
+        tabs.pack_start(default_tab, False, False, 0)
+        tabs.pack_start(often_tab, False, False, 0)
+        box.pack_start(tabs, False, False, 4)
+        rows = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        create = self._collect_row("创建新歌单", "", lambda: self._create_and_collect(song, popover), plus=True)
+        rows.pack_start(create, False, False, 0)
+        liked = next((item for item in self.mine if item.get("special") == 5 or "喜欢的音乐" in (item.get("name") or "")), None)
+        if liked:
+            rows.pack_start(self._collect_row(liked.get("name") or "我喜欢的音乐", f"{liked.get('count') or 0}首", lambda item=liked: self._collect_choice(song, item, popover), cover=liked.get("cover")), False, False, 0)
+        for item in self._created_playlists():
+            rows.pack_start(self._collect_row(item.get("name") or "歌单", f"{item.get('count') or 0}首", lambda item=item: self._collect_choice(song, item, popover), cover=item.get("cover")), False, False, 0)
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scroll.add(rows)
+        box.pack_start(scroll, True, True, 0)
+        popover.add(box)
+        box.show_all()
+        self._collect_popover = popover
+        popover.popup()
+
+    def _collect_row(self, name, count, handler, plus=False, cover=""):
+        button = Gtk.Button()
+        button.set_relief(Gtk.ReliefStyle.NONE)
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        row.set_margin_top(6)
+        row.set_margin_bottom(6)
+        if plus:
+            mark = Gtk.Label(label="+")
+            mark.set_size_request(40, 40)
+            mark.get_style_context().add_class("collect-plus")
+        else:
+            mark = Gtk.Image.new_from_icon_name("folder-music-symbolic", Gtk.IconSize.DIALOG)
+            mark.set_pixel_size(40)
+            if cover:
+                self._bg(lambda url=cover, widget=mark: self._set_remote_image(url, widget, 40))
+        text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        title = Gtk.Label(label=name, xalign=0)
+        title.set_ellipsize(3)
+        title.get_style_context().add_class("collect-name")
+        text.pack_start(title, False, False, 0)
+        if count:
+            meta = Gtk.Label(label=count, xalign=0)
+            meta.get_style_context().add_class("collect-count")
+            text.pack_start(meta, False, False, 0)
+        row.pack_start(mark, False, False, 0)
+        row.pack_start(text, True, True, 0)
+        button.add(row)
+        button.connect("clicked", lambda *_: handler())
+        return button
+
+    def _collect_choice(self, song, playlist, popover):
+        popover.popdown()
+        self._collect_to(song, playlist.get("id"), playlist.get("name") or "歌单")
+
+    def _create_and_collect(self, song, popover):
+        popover.popdown()
+        dialog = Gtk.Dialog(title="创建新歌单", parent=self, flags=Gtk.DialogFlags.MODAL)
+        dialog.add_button("取消", Gtk.ResponseType.CANCEL)
+        dialog.add_button("创建", Gtk.ResponseType.OK)
+        dialog.set_default_response(Gtk.ResponseType.OK)
+        entry = Gtk.Entry()
+        entry.set_placeholder_text("歌单名称")
+        entry.set_margin_start(16)
+        entry.set_margin_end(16)
+        entry.set_margin_top(12)
+        entry.set_margin_bottom(12)
+        entry.set_activates_default(True)
+        dialog.get_content_area().pack_start(entry, True, True, 0)
+        dialog.show_all()
+        if dialog.run() != Gtk.ResponseType.OK:
+            dialog.destroy()
+            return
+        name = entry.get_text().strip()
+        dialog.destroy()
+        if not name:
+            self._status("歌单名称不能为空")
+            return
+        self._status(f"正在创建「{name}」…")
+        self._bg(lambda: self._create_playlist(song, name))
+
+    def _create_playlist(self, song, name):
+        try:
+            playlist_id = api.create_playlist(name, self.cookie)
+            if song and song.get("id"):
+                api.add_playlist_track(playlist_id, song["id"], self.cookie)
+        except api.ApiError as exc:
+            GLib.idle_add(self._status, str(exc))
+            return
+        GLib.idle_add(self._status, f"已创建并加入「{name}」")
+        self._load_account()
+
+    def _menu_item(self, label, icon_name, handler, sensitive=True):
+        item = Gtk.ImageMenuItem.new_with_label(label)
+        item.set_image(Gtk.Image.new_from_icon_name(icon_name, Gtk.IconSize.MENU))
+        item.set_always_show_image(True)
+        item.set_sensitive(sensitive)
+        item.connect("activate", lambda *_: handler())
+        return item
+
+    def _popup_more(self):
+        song = self.current_song or {}
+        ready = bool(song.get("id"))
+        menu = Gtk.Menu()
+        items = (
+            ("下载", "folder-download-symbolic", lambda: self._enqueue_download(song), ready),
+            ("分享", "emblem-shared-symbolic", lambda: self._share_song(song), ready),
+            ("一起听", "system-users-symbolic", lambda: self._status("一起听还没接入"), True),
+            ("播放倍速", "media-seek-forward-symbolic", self._cycle_rate, ready),
+        )
+        for label, icon_name, handler, sensitive in items:
+            menu.append(self._menu_item(label, icon_name, handler, sensitive))
+        menu.append(Gtk.SeparatorMenuItem())
+        artist = song.get("artist") or "歌手"
+        album = song.get("album") or "专辑"
+        links = (
+            (f"歌手: {artist}", "avatar-default-symbolic", self._open_current_artist, ready),
+            (f"专辑: {album}", "media-optical-symbolic", lambda: self._open_album(song.get("albumId"), album), ready),
+            ("音效", "audio-volume-high-symbolic", lambda: self._status("音效还没接入"), True),
+        )
+        for label, icon_name, handler, sensitive in links:
+            menu.append(self._menu_item(label, icon_name, handler, sensitive))
+        menu.append(Gtk.SeparatorMenuItem())
+        menu.append(self._menu_item("减少推荐", "list-remove-symbolic", lambda: self._status("已记下，当前推荐仍按热门歌单显示")))
+        menu.show_all()
+        menu.popup_at_widget(self.more_btn, Gdk.Gravity.NORTH_EAST, Gdk.Gravity.SOUTH_EAST, None)
+
+    def _share_song(self, song):
+        if not song or not song.get("id"):
+            self._status("还没有正在播放的歌曲")
+            return
+        url = f"https://music.163.com/song?id={int(song['id'])}"
+        clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
+        clipboard.set_text(url, -1)
+        self._status(f"已复制分享链接：{song.get('name') or ''}")
+
+    def _cycle_rate(self):
+        rates = (1.0, 1.25, 1.5, 0.75)
+        current = getattr(self, "_play_rate", 1.0)
+        rate = rates[(rates.index(current) + 1) % len(rates)] if current in rates else 1.0
+        self._play_rate = rate
+        try:
+            self.player.playbin.seek(
+                rate,
+                Gst.Format.TIME,
+                Gst.SeekFlags.FLUSH | Gst.SeekFlags.ACCURATE,
+                Gst.SeekType.SET,
+                int(self.player.position_ms() * Gst.MSECOND),
+                Gst.SeekType.NONE,
+                0,
+            )
+        except Exception:
+            self._status("倍速没有切换成功")
+            return
+        self._status(f"播放倍速 {rate:g}x")
 
     def _toggle_volume(self):
         if self.volume_popup.get_visible():
@@ -1598,7 +1999,7 @@ class AppWindow(Gtk.ApplicationWindow):
         else:
             button = Gtk.Button()
             image = Gtk.Image.new_from_pixbuf(name)
-            image.set_pixel_size(16)
+            image.set_pixel_size(name.get_width())
             button.set_image(image)
             button.set_always_show_image(True)
         button.get_style_context().add_class(style)
@@ -1606,46 +2007,83 @@ class AppWindow(Gtk.ApplicationWindow):
         button.connect("clicked", lambda *_: handler())
         return button
 
-    def _quality_short(self):
-        for key, name, hint in api.QUALITIES:
-            if key == self.quality:
-                return name
-        return "音质"
+    def _quality_short(self, level=None):
+        level = level or getattr(self, "_applied_quality", None) or self.quality
+        return self._quality_name(level).split()[0] or "音质"
 
-    def _rebuild_quality_menu(self):
+    def _rebuild_quality_menu(self, levels=None, selected=None):
+        """菜单只列这首歌能播的档，勾选的是正在播放的档，不是偏好档。"""
+        if levels is None:
+            levels = getattr(self, "_quality_options", None) or [key for key, _name, _hint in api.QUALITIES]
+        allowed = [key for key, _name, _hint in api.QUALITIES if key in levels]
+        if not allowed:
+            allowed = [key for key, _name, _hint in api.QUALITIES]
+        selected = selected or getattr(self, "_applied_quality", None) or self.quality
+        if selected not in allowed:
+            selected = allowed[0]
         menu = Gtk.Menu()
         menu.get_style_context().add_class("menu")
         group = None
         for key, name, hint in api.QUALITIES:
+            if key not in allowed:
+                continue
             item = Gtk.RadioMenuItem(label=f"{name}   {hint}", group=group)
             group = item
-            item.set_active(key == self.quality)
+            item.set_active(key == selected)
             item.get_child().override_color(Gtk.StateFlags.NORMAL, Gdk.RGBA(0.13, 0.13, 0.15, 1))
             item.get_child().override_color(Gtk.StateFlags.PRELIGHT, Gdk.RGBA(0.13, 0.13, 0.15, 1))
             menu.append(item)
             item.connect("activate", self._on_quality, key)
         menu.show_all()
+        self._quality_options = allowed
         self.quality_btn.set_popup(menu)
-        self.quality_btn.set_label(self._quality_short())
+        self.quality_btn.set_label(self._quality_short(selected))
+
+    def _apply_quality_state(self, song, info, levels=None):
+        """切歌或切音质后，按钮和菜单都改成实际在播的档。"""
+        if self.current_song and song and self.current_song.get("id") != song.get("id"):
+            return False
+        level = (info or {}).get("level") or self.quality
+        if level == "local":
+            self._applied_quality = "local"
+            self.quality_btn.set_label("本地")
+            return False
+        self._applied_quality = level
+        if levels:
+            self._quality_options = [key for key in levels if key in api.QUALITY_LABEL]
+        self._rebuild_quality_menu(self._quality_options, selected=level)
+        return False
+
+    def _refresh_quality_options(self, song, known=None):
+        try:
+            levels = api.song_qualities(song["id"], cookie=self.cookie, known=known)
+        except api.ApiError:
+            return
+        if self.current_song and self.current_song.get("id") != song.get("id"):
+            return
+        if not levels:
+            return
+        GLib.idle_add(self._rebuild_quality_menu, levels, getattr(self, "_applied_quality", None))
 
     def _on_quality(self, item, key):
         if item is not None and not item.get_active():
             return
-        if key == getattr(self, "_applied_quality", None) and self.player.playing():
+        if key == getattr(self, "_applied_quality", None):
             return
         self.quality = key
-        self._applied_quality = key
         self._save_quality(key)
-        self.quality_btn.set_label(self._quality_short())
         song = self.current_song
-        if not song:
+        if not song or not song.get("id"):
+            self._applied_quality = key
+            self.quality_btn.set_label(self._quality_short(key))
             self._status(f"音质已设为{api.QUALITY_LABEL.get(key, key)}")
             return
-        resume_at = self.player.position_ms() if (self.player.playing() or self.player.paused()) else 0
-        self._status(f"正在切换到{api.QUALITY_LABEL.get(key, key)}…")
-        self._bg(lambda: self._restart_quality(song, resume_at))
+        playing = self.player.playing() or self.player.paused()
+        resume_at = self.player.position_ms() if playing else 0
+        self._status(f"正在确认{api.QUALITY_LABEL.get(key, key)}…")
+        self._bg(lambda: self._switch_quality(song, resume_at, playing))
 
-    def _restart_quality(self, song, resume_at):
+    def _switch_quality(self, song, resume_at, playing):
         try:
             info = api.song_url(song["id"], level=self.quality, cookie=self.cookie)
         except api.ApiError as exc:
@@ -1654,12 +2092,28 @@ class AppWindow(Gtk.ApplicationWindow):
         if self.current_song and self.current_song.get("id") != song.get("id"):
             return
         if not info:
-            GLib.idle_add(self._status, f"「{song['name']}」没有可播放地址。")
+            GLib.idle_add(self._status, f"「{song.get('name') or ''}」没有可播放地址")
+            return
+        got = info.get("level") or self.quality
+        current = getattr(self, "_applied_quality", None)
+        if got == current and playing:
+            GLib.idle_add(self._quality_kept, song, info)
+            self._bg(lambda: self._refresh_quality_options(song, {got: info}))
             return
         self.player.play(info["url"])
-        if resume_at > 1500:
-            GLib.timeout_add(350, self._seek_after_switch, song, resume_at, 0)
+        if resume_at > 800:
+            self.player.seek_ms(resume_at)
+            GLib.timeout_add(180, self._seek_after_switch, song, resume_at, 0)
         GLib.idle_add(self._quality_started, song, info)
+        self._bg(lambda: self._refresh_quality_options(song, {got: info}))
+
+    def _quality_kept(self, song, info):
+        if self.current_song and self.current_song.get("id") != song.get("id"):
+            return False
+        self._apply_quality_state(song, info)
+        label = api.QUALITY_LABEL.get(info.get("level") or "", "")
+        self._status(f"这首歌当前就是{label}，没有重新播放")
+        return False
 
     def _seek_after_switch(self, song, resume_at, tries):
         if not self.current_song or self.current_song.get("id") != song.get("id"):
@@ -1674,8 +2128,9 @@ class AppWindow(Gtk.ApplicationWindow):
         if self.current_song and self.current_song.get("id") != song.get("id"):
             return False
         level = info.get("level") or ""
+        self._apply_quality_state(song, info)
         label = api.QUALITY_LABEL.get(level, level)
-        note = "，已按账号权限降级" if level and level != self.quality else ""
+        note = "，已换成这首歌能播的最高档" if level and level != self.quality else ""
         kbps = int((info.get("br") or 0) / 1000)
         self._status(f"正在播放 · {label} · {kbps}kbps {(info.get('type') or '').upper()}{note}")
         self._set_play_icon(True)
@@ -1687,10 +2142,16 @@ class AppWindow(Gtk.ApplicationWindow):
         self.nav_buttons = []
         self._nav("推荐", lambda: self._show_home(), current=True, icon="user-home-symbolic")
         for cid, name in api.CHARTS[:4]:
-            self._nav(name, lambda c=cid, n=name: self._open_playlist(c, n), icon=note_icon())
+            self._nav(
+                name,
+                lambda c=cid, n=name: self._open_playlist(c, n),
+                icon=note_icon(),
+                cover_id=cid,
+            )
         self._nav("热门歌单", self._open_discover, icon="folder-music-symbolic")
         if self.profile:
             self._section(self.profile.get("vip") or "我的")
+            liked = next((item for item in self.mine if item.get("special") == 5 or "喜欢的音乐" in (item.get("name") or "")), None)
             self._nav("我喜欢的音乐", self._open_liked, icon="emblem-favorite-symbolic")
             self._nav("每日推荐", self._open_daily, icon="x-office-calendar-symbolic")
             self._nav("私人FM", self._open_fm, icon=fm_icon())
@@ -1701,6 +2162,8 @@ class AppWindow(Gtk.ApplicationWindow):
             collected = []
             uid = self.profile.get("userId")
             for item in self.mine:
+                if item is liked:
+                    continue
                 (created if item.get("creator") == uid else collected).append(item)
             if created:
                 self._section("创建的歌单")
@@ -1708,7 +2171,7 @@ class AppWindow(Gtk.ApplicationWindow):
                     self._nav(
                         item["name"],
                         lambda i=item: self._open_playlist(i["id"], i["name"], mine=True),
-                        icon="folder-music-symbolic",
+                        cover=item.get("cover") or "",
                     )
             if collected:
                 self._section("收藏的歌单")
@@ -1716,7 +2179,7 @@ class AppWindow(Gtk.ApplicationWindow):
                     self._nav(
                         item["name"],
                         lambda i=item: self._open_playlist(i["id"], i["name"]),
-                        icon="folder-music-symbolic",
+                        cover=item.get("cover") or "",
                     )
         self.nav_box.show_all()
 
@@ -1759,7 +2222,7 @@ class AppWindow(Gtk.ApplicationWindow):
         label.get_style_context().add_class("section")
         self.nav_box.pack_start(label, False, False, 0)
 
-    def _nav(self, text, handler, current=False, icon="folder-music-symbolic"):
+    def _nav(self, text, handler, current=False, icon="folder-music-symbolic", cover="", cover_id=None):
         button = Gtk.Button()
         button.set_relief(Gtk.ReliefStyle.NONE)
         button.set_halign(Gtk.Align.FILL)
@@ -1767,10 +2230,10 @@ class AppWindow(Gtk.ApplicationWindow):
         button.get_style_context().add_class("side-row")
         row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         if isinstance(icon, str):
-            image = Gtk.Image.new_from_icon_name(icon, Gtk.IconSize.BUTTON)
+            image = Gtk.Image.new_from_icon_name(icon, Gtk.IconSize.MENU)
         else:
             image = Gtk.Image.new_from_pixbuf(icon)
-        image.set_pixel_size(16)
+        image.set_pixel_size(14)
         label = Gtk.Label(label=text, xalign=0)
         label.set_ellipsize(3)
         row.pack_start(image, False, False, 0)
@@ -1781,6 +2244,43 @@ class AppWindow(Gtk.ApplicationWindow):
         button.connect("clicked", lambda *_: self._select_nav(button, handler))
         self.nav_buttons.append(button)
         self.nav_box.pack_start(button, False, False, 0)
+        if cover or cover_id:
+            self._bg(lambda: self._load_nav_cover(image, cover, cover_id))
+
+    def _load_nav_cover(self, image, cover, cover_id):
+        """侧栏先显示默认图标。封面到了再换，不挡住歌单列表。"""
+        url = cover
+        if not url and cover_id:
+            url = self._chart_cover(cover_id)
+        if not url:
+            return
+        try:
+            pix = load_pixbuf(url, 14 * max(2, _screen_scale()))
+        except Exception:
+            return
+        GLib.idle_add(self._apply_nav_cover, image, pix)
+
+    def _apply_nav_cover(self, image, pix):
+        if image.get_parent() is None:
+            return False
+        image.set_from_pixbuf(pix)
+        image.set_pixel_size(14)
+        return False
+
+    def _chart_cover(self, playlist_id):
+        cached = getattr(self, "_chart_covers", None)
+        if cached is None:
+            cached = {}
+            self._chart_covers = cached
+        if playlist_id in cached:
+            return cached[playlist_id]
+        try:
+            payload = api.request("/api/v6/playlist/detail", {"id": int(playlist_id), "n": 0}, cookie=self.cookie)
+        except api.ApiError:
+            return ""
+        cover = ((payload.get("playlist") or {}).get("coverImgUrl") or "")
+        cached[playlist_id] = cover
+        return cover
 
     def _select_nav(self, button, handler):
         for item in self.nav_buttons:
@@ -2702,7 +3202,22 @@ class AppWindow(Gtk.ApplicationWindow):
         if total <= 0:
             return False
         self.scale.set_value(min(1000, elapsed * 1000 / total))
+        self._place_time_pill(elapsed, total)
+        return False
+
+    def _place_time_pill(self, elapsed, total):
+        """时间胶囊跟着进度滑块走，贴在进度条中间偏上。"""
         self.time_label.set_text(f"{fmt_time(elapsed)} / {fmt_time(total)}")
+        width = self.scale.get_allocated_width()
+        if width <= 24 or not total:
+            self.time_label.set_halign(Gtk.Align.CENTER)
+            return False
+        fraction = max(0.0, min(1.0, float(elapsed) / float(total)))
+        pill = self.time_label.get_allocated_width() or 92
+        x = int(fraction * (width - 16)) - pill // 2
+        x = max(0, min(width - pill, x))
+        self.time_label.set_halign(Gtk.Align.START)
+        self.time_label.set_margin_start(x)
         return False
 
     def _resume_playback(self, song, position):
@@ -3309,6 +3824,8 @@ class AppWindow(Gtk.ApplicationWindow):
         self.lyric_artist.set_text(song["artist"] or "")
         self.lyric_buf.set_text("歌词加载中…")
         self._status(f"正在获取{api.QUALITY_LABEL.get(self.quality, '')}…")
+        # 上一首的可播档不能带到这首。探测回来前先按偏好显示，不勾上一首的结果。
+        self._rebuild_quality_menu([key for key, _name, _hint in api.QUALITIES], selected=self.quality)
         self._bg(lambda: self._start_song(song))
         if song.get("cover"):
             self._bg(lambda: self._set_remote_image(song["cover"], self.cover, 46))
@@ -3337,7 +3854,32 @@ class AppWindow(Gtk.ApplicationWindow):
             GLib.idle_add(self._no_url, song, lines)
             return
         self.player.play(info["url"])
+        GLib.timeout_add(400, self._apply_saved_volume)
         GLib.idle_add(self._started, song, lines, info)
+        GLib.idle_add(self._note_actual_quality, song, info)
+        if not local:
+            self._bg(lambda: self._refresh_quality_options(song, {info.get("level"): info}))
+
+    def _note_actual_quality(self, song, info):
+        self._apply_quality_state(song, info)
+        return False
+
+    def _apply_saved_volume(self):
+        """开播后播放流才出现。把滑条上的音量套到这一条流，不改其他程序。"""
+        stream = self._pulse_stream()
+        if not stream:
+            return False
+        percent = f"{int(round(self.volume.get_value() * 100))}%"
+        try:
+            subprocess.check_call(
+                ["pactl", "set-sink-input-volume", stream, percent],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=2,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False
+        return False
 
     def _started(self, song, lines, info):
         if self.current_song and self.current_song.get("id") != song.get("id"):
@@ -3358,6 +3900,88 @@ class AppWindow(Gtk.ApplicationWindow):
         self._fill_lyrics(lines)
         self._status(f"「{song['name']}」没有可播放地址。" + ("" if self.cookie else "请先登录。"))
         return False
+
+    def _toggle_desk_lyric(self):
+        window = getattr(self, "_desk_lyric", None)
+        if window is not None and window.get_visible():
+            window.hide()
+            return
+        if window is None:
+            window = self._build_desk_lyric()
+            self._desk_lyric = window
+        self._update_desk_lyric()
+        window.present()
+
+    def _build_desk_lyric(self):
+        """桌面歌词不进任务栏，可拖动，双击关闭。"""
+        window = Gtk.Window(type=Gtk.WindowType.POPUP)
+        window.set_title("桌面歌词")
+        window.set_decorated(False)
+        window.set_type_hint(Gdk.WindowTypeHint.UTILITY)
+        window.set_keep_above(True)
+        window.set_skip_taskbar_hint(True)
+        window.set_skip_pager_hint(True)
+        window.set_accept_focus(False)
+        window.set_app_paintable(True)
+        window.set_resizable(False)
+        window.set_default_size(640, 64)
+        screen = window.get_screen()
+        window.move(max(0, (screen.get_width() - 640) // 2), max(0, screen.get_height() - 112))
+        visual = screen.get_rgba_visual()
+        if visual is not None:
+            window.set_visual(visual)
+        label = Gtk.Label(label="暂无歌词")
+        label.set_ellipsize(Pango.EllipsizeMode.END)
+        label.set_max_width_chars(36)
+        label.get_style_context().add_class("desk-lyric")
+        window.add(label)
+        window.lyric_label = label
+        window.connect("button-press-event", self._desk_lyric_press)
+        window.connect("motion-notify-event", self._desk_lyric_drag)
+        window.connect("draw", self._draw_desk_lyric)
+        window.show_all()
+        return window
+
+    def _draw_desk_lyric(self, window, ctx):
+        width, height = window.get_allocated_width(), window.get_allocated_height()
+        ctx.set_source_rgba(0.12, 0.12, 0.14, 0.62)
+        ctx.arc(16, 16, 16, 3.1416, 4.7124)
+        ctx.arc(width - 16, 16, 16, 4.7124, 6.2832)
+        ctx.arc(width - 16, height - 16, 16, 0, 1.5708)
+        ctx.arc(16, height - 16, 16, 1.5708, 3.1416)
+        ctx.close_path()
+        ctx.fill()
+        return False
+
+    def _desk_lyric_press(self, window, event):
+        if event.type == Gdk.EventType._2BUTTON_PRESS:
+            window.hide()
+            return True
+        window._drag = (event.x_root, event.y_root, *window.get_position())
+        return True
+
+    def _desk_lyric_drag(self, window, event):
+        if not (event.state & Gdk.ModifierType.BUTTON1_MASK) or not getattr(window, "_drag", None):
+            return False
+        x0, y0, wx, wy = window._drag
+        window.move(int(wx + event.x_root - x0), int(wy + event.y_root - y0))
+        return True
+
+    def _update_desk_lyric(self):
+        window = getattr(self, "_desk_lyric", None)
+        if window is None or not window.get_visible():
+            return
+        line = "暂无歌词"
+        if self.lyrics:
+            heard = self.player.position_ms() + 450
+            for ms, text in self.lyrics:
+                if ms <= heard and text:
+                    line = text
+                elif ms > heard:
+                    break
+        elif self.current_song:
+            line = self.current_song.get("name") or line
+        window.lyric_label.set_text(line)
 
     def _toggle(self):
         if self.player.playing():
@@ -3407,14 +4031,11 @@ class AppWindow(Gtk.ApplicationWindow):
         return False
 
     def _set_play_icon(self, playing):
-        image = Gtk.Image.new_from_icon_name(
-            "media-playback-pause-symbolic" if playing else "media-playback-start-symbolic",
-            Gtk.IconSize.BUTTON,
-        )
-        color = Gdk.RGBA(1, 1, 1, 1) if self._play_hovered else Gdk.RGBA(0.12, 0.12, 0.14, 1)
-        for state in (Gtk.StateFlags.NORMAL, Gtk.StateFlags.PRELIGHT, Gtk.StateFlags.ACTIVE):
-            image.override_color(state, color)
+        # 主题暂停符是白色，红底没画上时会和底栏混在一起。改用深色自绘，白底上也看得见。
+        image = Gtk.Image.new_from_pixbuf(play_glyph(20, playing=playing))
+        image.set_pixel_size(20)
         self.play_btn.set_image(image)
+        self.play_btn.set_always_show_image(True)
 
     def _on_hotkey(self, action):
         if action == "playpause":
@@ -3453,11 +4074,31 @@ class AppWindow(Gtk.ApplicationWindow):
                 self.scale.set_value(min(1000, elapsed * 1000 / total))
             shown = elapsed
             if self.seeking:
-                shown = total * self.scale.get_value() / 1000
-            self.time_label.set_text(f"{fmt_time(shown)} / {fmt_time(total)}")
-            self._highlight_lyric(elapsed)
+                shown = getattr(self, "_seek_hold", 0) or total * self.scale.get_value() / 1000
+                self.scale.set_value(min(1000, shown * 1000 / total))
+            self._place_time_pill(shown, total)
+            self._highlight_lyric(shown if self.seeking else elapsed)
+            self._update_desk_lyric()
         elif song and getattr(self, "_resume_at", 0) and not self.player.playing():
             self._show_paused_progress()
+        return True
+
+    def _seek_press(self, scale, event):
+        """点在轨道任意位置就跳过去。只拖滑块时，细轨道几乎点不中。"""
+        if event.button != 1:
+            return False
+        total = self.player.duration_ms() or (self.current_song or {}).get("duration") or 0
+        width = scale.get_allocated_width()
+        if not total or width <= 1:
+            return False
+        fraction = max(0.0, min(1.0, event.x / width))
+        self.seeking = True
+        scale.set_value(fraction * scale.get_adjustment().get_upper())
+        self.player.seek_ms(total * fraction)
+        self._place_time_pill(total * fraction, total)
+        self._seek_hold = total * fraction
+        self._seek_tries = 0
+        GLib.timeout_add(250, self._seek_done, total * fraction)
         return True
 
     def _seek_change(self, scale, scroll, value):
@@ -3465,6 +4106,9 @@ class AppWindow(Gtk.ApplicationWindow):
         self.seeking = True
         upper = scale.get_adjustment().get_upper()
         scale.set_value(max(0, min(upper, value)))
+        total = self.player.duration_ms() or (self.current_song or {}).get("duration") or 0
+        if total:
+            self._place_time_pill(total * scale.get_value() / 1000, total)
         return True
 
     def _seek_release(self, _scale, _event):

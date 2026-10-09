@@ -186,6 +186,25 @@ def _chart_songs(playlist_id, cookie):
     return [_song(item) for item in playlist.get("tracks") or []]
 
 
+def song_qualities(song_id, cookie="", known=None):
+    """逐档请求播放地址，只保留服务端原样返回的档。
+
+    不支持的档会被降到更低的 level，那种结果不记入可选项。
+    调用方已经持有某一档时传入 known，可少打一次请求。
+    """
+    known = dict(known or {})
+    supported = []
+    for key, _name, _hint in QUALITIES:
+        cached = known.get(key)
+        if cached is None:
+            cached = song_url(song_id, level=key, cookie=cookie)
+            if cached and cached.get("level"):
+                known[cached["level"]] = cached
+        if cached and cached.get("level") == key and cached.get("url"):
+            supported.append(key)
+    return supported
+
+
 def song_url(song_id, level="lossless", cookie=""):
     """按音质档请求播放地址。level 见 QUALITIES。"""
     if level not in QUALITY_LABEL:
@@ -299,6 +318,19 @@ def playlist_track_ids(playlist_id, cookie=""):
     payload = request("/api/v6/playlist/detail", {"id": int(playlist_id), "n": 0}, cookie=cookie)
     playlist = payload.get("playlist") or {}
     return [int(item.get("id")) for item in playlist.get("trackIds") or [] if item.get("id")]
+
+
+def create_playlist(name, cookie):
+    """创建自己的歌单。名称来自输入框，接口按登录账号归属。"""
+    name = (name or "").strip()
+    if not name:
+        raise ApiError("歌单名称不能为空")
+    payload = request("/api/playlist/create", {"name": name[:40]}, cookie=cookie)
+    playlist = payload.get("playlist") or payload.get("result") or {}
+    playlist_id = playlist.get("id") or payload.get("id")
+    if not playlist_id:
+        raise ApiError("歌单已创建，但没有返回编号")
+    return int(playlist_id)
 
 
 def _manipulate_track(playlist_id, song_id, op, cookie):
