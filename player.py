@@ -4182,8 +4182,12 @@ class AppWindow(Gtk.ApplicationWindow):
             title = (self.current_song or {}).get("name") or ""
             return title, 0, 1
         start, text = lines[index]
-        end = lines[index + 1][0] if index + 1 < len(lines) else start + 4000
-        return text, start, end
+        if index + 1 < len(lines):
+            nxt = lines[index + 1][0]
+            end = nxt
+        else:
+            end = start + 4000
+        return text, start, max(start + 1, end)
 
     def _publish_desk_lyric(self, elapsed=0):
         """只在换句时写文件。颜色进度由歌词窗口按时间自己往前走，不再每拍读盘。"""
@@ -4829,7 +4833,7 @@ def _launch_desk_lyric():
     env["GDK_BACKEND"] = "x11"
     env.pop("WAYLAND_DISPLAY", None)
     # 不设置 GDK_SCALE。整数倍缩放会把歌词窗口放大，并把它推进任务栏。
-    return subprocess.Popen([sys.executable, os.path.abspath(__file__), "--desk-lyric"], env=env)
+    return subprocess.Popen(["/usr/bin/python3", os.path.abspath(__file__), "--desk-lyric"], env=env)
 
 
 def _run_desk_lyric():
@@ -5041,8 +5045,8 @@ def _run_desk_lyric():
     window.show_all()
     close.hide()
     plate.hide()
-    GLib.timeout_add(1000, refresh)
-    GLib.timeout_add(80, advance)
+    GLib.timeout_add(250, refresh)
+    GLib.timeout_add(40, advance)
     Gtk.main()
 
 
@@ -5050,6 +5054,16 @@ def main():
     os.makedirs(DATA_DIR, exist_ok=True)
     os.chmod(DATA_DIR, 0o700)
     if "--desk-lyric" in sys.argv:
+        # 被 python -m qt.app 拉起时，argv 里会带着播放器入口。再往下跑会把主程序又开一遍。
+        sys.argv = [os.path.abspath(__file__), "--desk-lyric"]
+        try:
+            import ctypes
+            libc = ctypes.CDLL("libc.so.6", use_errno=True)
+            libc.prctl.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong]
+            libc.prctl.restype = ctypes.c_int
+            libc.prctl(15, b"desk-lyric", 0, 0, 0)
+        except (OSError, AttributeError):
+            pass
         _run_desk_lyric()
         return
     raise SystemExit(MusicApp().run([os.path.abspath(__file__)]))

@@ -2,4 +2,3 @@ packaging/bin/netease-music usr/bin
 player.py usr/lib/netease-music
 netease_api.py usr/lib/netease-music
 packaging/netease-music-linux.desktop usr/share/applications
-packaging/dbus/io.netease-music-linux.service usr/share/dbus-1/services

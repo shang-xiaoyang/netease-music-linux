@@ -1,5 +1,6 @@
 #!/bin/sh
 set -e
+rm -f /usr/share/dbus-1/services/io.netease-music-linux.service
 if command -v gtk-update-icon-cache >/dev/null 2>&1; then
   gtk-update-icon-cache -q /usr/share/icons/hicolor || true
 fi

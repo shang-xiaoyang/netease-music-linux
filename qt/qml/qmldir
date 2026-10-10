@@ -1,0 +1,2 @@
+module netease
+singleton Theme 1.0 theme/Theme.qml

@@ -21,3 +21,5 @@ state.json
 desk-lyric.json
 desk-lyric-pos.json
 desk-lyric-state.json
+.venv/
+qt-window.json

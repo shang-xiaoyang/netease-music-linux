@@ -120,18 +120,25 @@ def top_playlist(limit=24, cookie=""):
     return [_playlist(item) for item in playlists]
 
 
-def playlist_page(playlist_id, cookie="", limit=80, offset=0):
-    """歌单的一页歌曲。先拿 id，再按页补详情，避免一次拉完整张歌单。"""
+def playlist_page(playlist_id, cookie="", limit=80, offset=0, refs=None):
+    """歌单的一页歌曲。先拿 id，再按页补详情，避免一次拉完整张歌单。
+
+    refs 是上一页已经取回的曲目编号。传入后不再重复请求歌单详情。
+    """
     playlist_id = int(playlist_id)
-    payload = request("/api/v6/playlist/detail", {"id": playlist_id, "n": 0}, cookie=cookie)
-    playlist = payload.get("playlist") or {}
-    refs = playlist.get("trackIds") or []
+    playlist = {}
+    if refs is None:
+        payload = request("/api/v6/playlist/detail", {"id": playlist_id, "n": 0}, cookie=cookie)
+        playlist = payload.get("playlist") or {}
+        refs = playlist.get("trackIds") or []
     if not refs:
         songs = _chart_songs(playlist_id, cookie)
         return _playlist_result(playlist, playlist_id, songs, len(songs))
     page = refs[offset:offset + limit]
     songs = _songs_by_ids(page, cookie)
-    return _playlist_result(playlist, playlist_id, songs, len(refs))
+    result = _playlist_result(playlist, playlist_id, songs, len(refs))
+    result["refs"] = refs
+    return result
 
 
 def playlist_tracks(playlist_id, cookie="", by_added=False):
@@ -363,10 +370,25 @@ def _comment(item):
         "id": item.get("commentId"),
         "content": item.get("content") or "",
         "nickname": user.get("nickname") or "",
+        "userId": user.get("userId") or "",
         "avatar": user.get("avatarUrl") or "",
         "liked": item.get("likedCount") or 0,
         "time": item.get("time") or 0,
     }
+
+
+def add_comment(song_id, content, cookie):
+    """发表歌曲评论。内容来自输入框，接口按登录账号归属。"""
+    text = (content or "").strip()
+    if not text:
+        raise ApiError("评论不能为空")
+    if len(text) > 140:
+        raise ApiError("评论不能超过 140 字")
+    request(
+        "/api/resource/comments/add",
+        {"threadId": f"R_SO_4_{int(song_id)}", "content": text, "t": "1", "type": "0"},
+        cookie=cookie,
+    )
 
 
 def personal_fm(cookie):
@@ -484,6 +506,20 @@ def user_account(cookie):
         "avatar": profile.get("avatarUrl") or "",
         "vip": vip.get("name") or "",
         "vipLevel": vip.get("level") or 0,
+        "vipExpire": vip.get("expire") or 0,
+    }
+
+
+def user_detail(uid, cookie=""):
+    payload = request(f"/api/v1/user/detail/{int(uid)}", cookie=cookie)
+    profile = payload.get("profile") or {}
+    return {
+        "userId": profile.get("userId") or uid,
+        "nickname": profile.get("nickname") or "用户",
+        "avatar": profile.get("avatarUrl") or "",
+        "signature": profile.get("signature") or "",
+        "follows": profile.get("follows") or 0,
+        "followers": profile.get("followeds") or 0,
     }
 
 

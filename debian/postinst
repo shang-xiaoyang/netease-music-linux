@@ -1,5 +1,7 @@
 #!/bin/sh
 set -e
+# 旧包把启动脚本注册成 D-Bus 服务。桌面按这个名字激活时会再开一个进程。
+rm -f /usr/share/dbus-1/services/io.netease-music-linux.service
 if command -v gtk-update-icon-cache >/dev/null 2>&1; then
   gtk-update-icon-cache -q /usr/share/icons/hicolor || true
 fi
