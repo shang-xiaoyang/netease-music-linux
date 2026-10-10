@@ -891,6 +891,17 @@ class Player:
                 # 缓冲会经过暂停。只有用户暂停才改按钮，不把开播中的按钮打回播放。
                 self._emit_state()
 
+    def begin_switch(self):
+        """切歌当下就停掉上一首。地址还没回来时，界面不能继续走旧进度。"""
+        self._want = "playing"
+        self.cached_pos = 0
+        self.cached_dur = 0
+        self._anchor_pos = 0
+        self._started_at = 0
+        self._seek_target = None
+        self.playbin.set_state(Gst.State.NULL)
+        self._emit_state()
+
     def play(self, url):
         parsed = urllib.parse.urlparse(str(url or ""))
         host = parsed.hostname or ""
@@ -4016,11 +4027,23 @@ class AppWindow(Gtk.ApplicationWindow):
         self.current_song = song
         self._resume_at = 0
         self._resume_used = True
+        self._resume_duration = int(song.get("duration") or 0)
+        self.seeking = False
+        self._seek_hold = 0
+        self.lyrics = []
+        self._lyric_index = -1
+        self._desk_lyric_payload = None
+        self.player.begin_switch()
         self.title_btn.set_text(song["name"])
         self._set_bar_artist(song)
         self.lyric_title.set_text(song["name"])
         self.lyric_artist.set_text(song["artist"] or "")
         self.lyric_buf.set_text("歌词加载中…")
+        self.scale.set_value(0)
+        self._time_text = None
+        self._place_time_pill(0, song.get("duration") or 0)
+        self._publish_desk_lyric(0)
+        self._sync_play_icon()
         self._status(f"正在获取{api.QUALITY_LABEL.get(self.quality, '')}…")
         # 上一首的可播档不能带到这首。探测回来前先按偏好显示，不勾上一首的结果。
         self._rebuild_quality_menu([key for key, _name, _hint in api.QUALITIES], selected=self.quality)
@@ -4284,12 +4307,17 @@ class AppWindow(Gtk.ApplicationWindow):
         song = self.current_song
         playing = bool(song) and self.player.playing()
         paused = bool(song) and self.player.paused() and not playing
-        if song and (playing or paused) and not self.seeking:
+        loading = playing and not self.player._started_at and self.player.cached_pos <= 0
+        if song and (playing or paused) and not self.seeking and not loading:
             self.player.refresh_clock()
         self._sync_play_icon()
-        if song and (playing or paused):
+        if loading and not self.seeking:
+            self.scale.set_value(0)
+            self._place_time_pill(0, song.get("duration") or 0)
+            self._publish_desk_lyric(0)
+        elif song and (playing or paused):
             elapsed = self.player.position_ms()
-            total = self.player.duration_ms() or song.get("duration") or getattr(self, "_resume_duration", 0) or 1
+            total = self.player.duration_ms() or song.get("duration") or 1
             hold = getattr(self, "_seek_hold", 0)
             if hold and abs(elapsed - hold) > 800 and self.seeking:
                 elapsed = hold
