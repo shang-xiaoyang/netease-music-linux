@@ -1173,7 +1173,7 @@ class AppBridge(QObject):
         self._lyric_words = words
         self._post("lyric", "\n".join(f"{ms}\t{text}" for ms, text in lines) or "0\t这首歌没有歌词")
         self._publish_track()
-        self._publish_desk_lyric(self.player.position()[0])
+        self._publish_desk_lyric(self.player.position()[0] or int(getattr(self, "_resume_at", 0) or 0))
 
     def _start(self, token, song):
         try:
@@ -1215,7 +1215,7 @@ class AppBridge(QObject):
         self._lyric_words = words
         self._post("lyric", "\n".join(f"{ms}\t{text}" for ms, text in lines) or "0\t这首歌没有歌词")
         self._publish_track()
-        self._publish_desk_lyric(0)
+        self._publish_desk_lyric(self.player.position()[0])
         label = api.QUALITY_LABEL.get(level, level)
         note = "，已换成这首歌能播的档" if level != self._quality else ""
         self.statusChanged.emit(f"正在播放 · {label}{note}")

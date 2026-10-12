@@ -89,7 +89,8 @@ class PlayerBackend(QObject):
             self._seek_target = keep if keep else None
             self._seek_stamp = time.time()
         self.playbin.set_state(Gst.State.NULL)
-        self.stateChanged.emit("playing")
+        # 管道还没出声，图标和进度先停住。真正开始后再标成播放中。
+        self.stateChanged.emit("paused")
         if not keep:
             self.positionChanged.emit(0, 0)
 
@@ -113,7 +114,6 @@ class PlayerBackend(QObject):
         self._uri = url
         self.playbin.set_property("volume", 1.0)
         self.playbin.set_state(Gst.State.PLAYING)
-        self.stateChanged.emit("playing")
         self.positionChanged.emit(keep, 0)
         self._ensure_clock()
 
@@ -150,7 +150,8 @@ class PlayerBackend(QObject):
             held = self._position
             self._want = "playing"
             self._anchor = held
-            self._started_at = time.time()
+            # 续播定位还没落地。先不走进度，等 ASYNC_DONE 或定位到达再开始。
+            self._started_at = 0
             self._seek_target = held if held > 500 else None
             self._seek_stamp = time.time()
         state = Gst.State.NULL
@@ -161,7 +162,6 @@ class PlayerBackend(QObject):
         if state == Gst.State.NULL and self._uri:
             self.playbin.set_property("uri", self._uri)
         self.playbin.set_state(Gst.State.PLAYING)
-        self.stateChanged.emit("playing")
         self._ensure_clock()
         if held > 500:
             threading.Thread(target=self._seek_worker, args=(held,), daemon=True).start()
@@ -201,7 +201,8 @@ class PlayerBackend(QObject):
         with self._lock:
             self._position = target
             self._anchor = target
-            self._started_at = time.time() if self._want == "playing" else 0
+            # 定位完成前不外推，避免进度先于声音往前走。
+            self._started_at = 0
             self._seek_target = target
             self._seek_stamp = time.time()
             duration = self._duration
@@ -265,17 +266,23 @@ class PlayerBackend(QObject):
         with self._lock:
             if self._want != "playing":
                 pos = 0
-            if pos and self._seek_landed(pos):
+            landed = bool(pos) and self._seek_landed(pos)
+            if landed:
                 self._position = pos
                 self._anchor = pos
                 self._started_at = time.time()
+                was_seeking = self._seek_target is not None
                 self._seek_target = None
                 emit = True
+            else:
+                was_seeking = False
             if dur and dur != self._duration:
                 self._duration = dur
                 emit = True
             current = self._position
             duration = self._duration
+        if emit and was_seeking:
+            self.stateChanged.emit("playing")
         if emit:
             self.positionChanged.emit(current, duration)
 
