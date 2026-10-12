@@ -1882,4 +1882,85 @@ ApplicationWindow {
         id: qualityMenu
         property string model: ""
     }
+
+    property bool resizing: false
+    property int resizeEdges: 0
+    property real resizeX0: 0
+    property real resizeY0: 0
+    property real resizeW0: 0
+    property real resizeH0: 0
+    property real resizePX: 0
+    property real resizePY: 0
+
+    function beginResize(edge, global) {
+        if (visibility === 4)
+            return
+        if (startSystemResize(edge))
+            return
+        resizing = true
+        resizeEdges = edge
+        resizeX0 = x
+        resizeY0 = y
+        resizeW0 = width
+        resizeH0 = height
+        resizePX = global.x
+        resizePY = global.y
+    }
+
+    function moveResize(global) {
+        if (!resizing)
+            return
+        var dx = global.x - resizePX
+        var dy = global.y - resizePY
+        var nx = resizeX0
+        var ny = resizeY0
+        var nw = resizeW0
+        var nh = resizeH0
+        if (resizeEdges & Qt.LeftEdge) {
+            nw = Math.max(minimumWidth, resizeW0 - dx)
+            nx = resizeX0 + resizeW0 - nw
+        }
+        if (resizeEdges & Qt.RightEdge)
+            nw = Math.max(minimumWidth, resizeW0 + dx)
+        if (resizeEdges & Qt.TopEdge) {
+            nh = Math.max(minimumHeight, resizeH0 - dy)
+            ny = resizeY0 + resizeH0 - nh
+        }
+        if (resizeEdges & Qt.BottomEdge)
+            nh = Math.max(minimumHeight, resizeH0 + dy)
+        x = nx
+        y = ny
+        width = nw
+        height = nh
+    }
+
+    // 无边框窗口没有系统缩放边。只铺在四边，不挡住标题按钮和列表。
+    Item {
+        id: resizeFrame
+        anchors.fill: parent
+        z: 30
+        enabled: window.visibility !== 4
+        visible: enabled
+
+        component ResizeGrip: MouseArea {
+            property int edge: 0
+            hoverEnabled: true
+            cursorShape: edge === Qt.LeftEdge || edge === Qt.RightEdge ? Qt.SizeHorCursor
+                : edge === Qt.TopEdge || edge === Qt.BottomEdge ? Qt.SizeVerCursor
+                : edge === (Qt.LeftEdge | Qt.TopEdge) || edge === (Qt.RightEdge | Qt.BottomEdge) ? Qt.SizeFDiagCursor
+                : Qt.SizeBDiagCursor
+            onPressed: function(mouse) { window.beginResize(edge, mapToGlobal(mouse.x, mouse.y)) }
+            onPositionChanged: function(mouse) { if (pressed) window.moveResize(mapToGlobal(mouse.x, mouse.y)) }
+            onReleased: window.resizing = false
+        }
+
+        ResizeGrip { edge: Qt.LeftEdge; width: 6; anchors.left: parent.left; anchors.top: parent.top; anchors.bottom: parent.bottom; anchors.topMargin: 8; anchors.bottomMargin: 8 }
+        ResizeGrip { edge: Qt.RightEdge; width: 6; anchors.right: parent.right; anchors.top: parent.top; anchors.bottom: parent.bottom; anchors.topMargin: 8; anchors.bottomMargin: 8 }
+        ResizeGrip { edge: Qt.TopEdge; height: 6; anchors.top: parent.top; anchors.left: parent.left; anchors.right: parent.right; anchors.leftMargin: 8; anchors.rightMargin: 8 }
+        ResizeGrip { edge: Qt.BottomEdge; height: 6; anchors.bottom: parent.bottom; anchors.left: parent.left; anchors.right: parent.right; anchors.leftMargin: 8; anchors.rightMargin: 8 }
+        ResizeGrip { edge: Qt.LeftEdge | Qt.TopEdge; width: 8; height: 8; anchors.left: parent.left; anchors.top: parent.top }
+        ResizeGrip { edge: Qt.RightEdge | Qt.TopEdge; width: 8; height: 8; anchors.right: parent.right; anchors.top: parent.top }
+        ResizeGrip { edge: Qt.LeftEdge | Qt.BottomEdge; width: 8; height: 8; anchors.left: parent.left; anchors.bottom: parent.bottom }
+        ResizeGrip { edge: Qt.RightEdge | Qt.BottomEdge; width: 8; height: 8; anchors.right: parent.right; anchors.bottom: parent.bottom }
+    }
 }

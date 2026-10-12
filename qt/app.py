@@ -312,11 +312,9 @@ def main():
         window.setY(max(area.y(), min(int(saved_y), area.y() + area.height() - 120)))
 
     def clamp():
-        fitted = _fit(window.width(), window.height())
-        if fitted != (window.width(), window.height()):
-            window.setWidth(fitted[0])
-            window.setHeight(fitted[1])
-        _save_geometry(window)
+        # 只记下用户拖出的大小。再写回宽高会把正在拖的边弹回去。
+        if window.visibility != 4:
+            _save_geometry(window)
 
     timer = QTimer()
     timer.setInterval(1500)
