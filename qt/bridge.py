@@ -59,7 +59,7 @@ class AppBridge(QObject):
     def __init__(self):
         super().__init__()
         self.player = PlayerBackend()
-        self.player.stateChanged.connect(self.stateChanged)
+        self.player.stateChanged.connect(self._on_player_state)
         self.player.positionChanged.connect(self._on_position)
         self.player.errorChanged.connect(self.statusChanged)
         self.player.ended.connect(self._on_ended)
@@ -85,6 +85,7 @@ class AppBridge(QObject):
         self._detail_text = ""
         self._detail_cover = ""
         self._loading_pos = False
+        self._ui_playing = False
         self._volume = self._saved_volume()
         self._pulse_cache = (0, None)
         self._liked = set()
@@ -1270,7 +1271,8 @@ class AppBridge(QObject):
 
     @pyqtSlot()
     def toggle(self):
-        if self.player.want() == "playing":
+        # 跟播放按钮用同一个状态。内部“想播放”在出声前就会置上，不能拿它判断能不能暂停。
+        if self._ui_playing:
             held = self.player.position()[0]
             self.player.pause()
             self._publish_desk_lyric(held)
@@ -2032,6 +2034,7 @@ class AppBridge(QObject):
             self.pageChanged.emit("lyric", self._page_title)
         self.clockChanged.emit(f"{position},{duration}")
         self.likedChanged.emit(song_id in self._liked)
+        self._ui_playing = False
         self.stateChanged.emit("paused")
         where = f" · {self._queue_title}" if self._queue_title else ""
         self.statusChanged.emit(f"已恢复 {self._song.get('name') or ''}{where} · 已暂停")
@@ -2128,6 +2131,10 @@ class AppBridge(QObject):
     @pyqtSlot()
     def openLyric(self):
         self._show("lyric", (self._song or {}).get("name") or "歌词")
+
+    def _on_player_state(self, state):
+        self._ui_playing = state == "playing"
+        self.stateChanged.emit(state)
 
     def _on_position(self, pos, dur):
         if self.player.want() != "playing":
