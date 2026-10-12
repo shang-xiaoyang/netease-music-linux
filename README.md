@@ -2,6 +2,8 @@
 
 非官方播放器。在本地 Qt Quick 窗口里播放网易云音乐，不套网页，不使用 Wine。同一份纯 Python 代码可在 x86、x86_64 和 ARM 的 Debian 系桌面运行。桌面歌词和托盘仍使用系统 GTK 组件。
 
+当前主分支是 `qt-player`。`main` 保留 Qt 迁移前的 GTK 播放器，不再增加新功能。
+
 本项目与网易公司没有关联，也未获授权。「网易云音乐」名称和官方标志归网易所有。安装包里的图标由打包脚本生成，是一张红底音符，不是官方唱片标志。歌曲、歌词和会员音质仍由网易云音乐按账号权限提供，本程序不绕过这些限制。
 
 许可证是 [MIT](LICENSE)。第三方权利说明见 [NOTICE.md](NOTICE.md)。
@@ -12,7 +14,7 @@
 sudo apt install python3 python3-pyqt5 python3-pyqt5.qtquick \
   qml-module-qtquick2 qml-module-qtquick-controls2 \
   qml-module-qtquick-layouts qml-module-qtquick-window2 \
-  python3-gi python3-dbus python3-pil \
+  python3-gi python3-dbus python3-pil python3-pycryptodome \
   gir1.2-gtk-3.0 gir1.2-gdkpixbuf-2.0 \
   gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0 \
   gir1.2-ayatanaappindicator3-0.1 \
@@ -30,7 +32,7 @@ sudo apt install python3 python3-pyqt5 python3-pyqt5.qtquick \
 dpkg-buildpackage -us -uc -b
 ```
 
-当前版本是 1.3.0。产物是 `Architecture: all` 的 deb。安装：
+当前版本是 1.3.1。产物是 `Architecture: all` 的 deb。安装：
 
 ```sh
 sudo apt install ./netease-music-linux_*_all.deb
@@ -56,7 +58,9 @@ gapplication action io.netease-music-linux quit
 - 播放模式可在列表循环、列表播放、单曲循环、随机播放之间切换
 - 底部「播放列表」弹出当前播放列表。退出后再打开会恢复歌曲、列表、音质和进度
 - 点进度条跳到对应位置
-- 点底部封面或歌名看歌词
+- 点底部封面或歌名看歌词。有逐字时间时，桌面歌词按每个字的开始时间变色，不按整句时长匀开
+- 桌面歌词是单独的无边框窗口，可拖动，记住物理像素位置。锁定后点击穿透，双击开锁图标恢复拖动
+- 已经出声的歌会缓存在本机。同一首、同一音质再次播放时直接读缓存，不等播放地址返回。出声前进度条和桌面歌词停住，不空走
 - 歌曲和歌单封面缓存在本机，下次打开直接读本地文件
 - 空格播放或暂停，左右方向键快进快退，Ctrl+F 搜索，Esc 收起队列和歌词
 - 播放条可调音量。列表右键可下一首播放、收藏、下载、看评论
@@ -73,7 +77,7 @@ gapplication action io.netease-music-linux quit
 | --- | --- |
 | `qt/` | Qt Quick 主界面、播放和接口桥接 |
 | `player.py` | 桌面歌词窗口，安装后仍随包保留 |
-| `netease_api.py` | 登录、搜索、歌单、播放地址 |
+| `netease_api.py` | 登录、搜索、歌单、播放地址和逐字歌词 |
 | `netease-music` | 从源码树启动 Qt Quick，并生成托盘用的图标 |
 | `packaging/` | 安装后的启动脚本、desktop、D-Bus service |
 | `debian/` | Debian 打包目录 |

@@ -21,7 +21,7 @@ if ROOT not in sys.path:
 import netease_api as api
 
 from qt.models import DictListModel
-from qt.paths import COOKIE_PATH, DATA_DIR, LYRIC_PATH, LYRIC_STATE_PATH, RECENT_PATH, STATE_PATH, VOLUME_PATH, player_script
+from qt.paths import COOKIE_PATH, DATA_DIR, LYRIC_PATH, LYRIC_STATE_PATH, LYRIC_TRACK_PATH, RECENT_PATH, STATE_PATH, VOLUME_PATH, player_script
 from qt.playback_cache import lookup as cache_lookup
 from qt.playback_cache import store as cache_store
 from qt.player_backend import PlayerBackend, allowed_uri
@@ -46,6 +46,7 @@ class AppBridge(QObject):
     modeChanged = pyqtSignal(str)
     qualityChanged = pyqtSignal(str)
     volumeChanged = pyqtSignal(float)
+    rateChanged = pyqtSignal(float)
     coverChanged = pyqtSignal(str)
     likedChanged = pyqtSignal(bool)
     lyricChanged = pyqtSignal(str)
@@ -88,6 +89,7 @@ class AppBridge(QObject):
         self._pulse_cache = (0, None)
         self._liked = set()
         self._lyrics = []
+        self._lyric_words = []
         self._desk_lyric_proc = None
         self._desk_lyric_payload = None
         self._profile = None
@@ -115,9 +117,11 @@ class AppBridge(QObject):
         self._ui_lock = threading.Lock()
         self._alive = True
         self._clock = QTimer(self)
+        # 进度条自己按墙钟走。这一拍只校正漂移，并偶尔把桌面歌词的进度对一下。
         self._clock.setInterval(1000)
         self._clock.timeout.connect(self._emit_clock)
         self._clock.start()
+        self._lyric_sync_at = 0.0
         self._uiReady.connect(self._drain_ui, Qt.QueuedConnection)
         self._fill_nav()
         self.accountChanged.emit("登录")
@@ -1135,15 +1139,46 @@ class AppBridge(QObject):
         kept = int(getattr(self, "_resume_at", 0) or 0)
         self.clockChanged.emit(f"{kept},{int(song.get('duration') or 0)}")
         self._lyrics = []
+        self._lyric_words = []
         self.lyricChanged.emit("")
-        self._publish_desk_lyric(0, song.get("name") or "歌词加载中…")
+        self._publish_desk_lyric(kept, song.get("name") or "歌词加载中…")
+        cached = cache_lookup(song["songId"], self._quality)
+        if cached:
+            self.statusChanged.emit("正在打开本机缓存")
+            self._post("play", urllib.parse.urljoin("file:", urllib.request.pathname2url(cached)))
+            resume_at = getattr(self, "_resume_at", 0)
+            self._resume_at = 0
+            if resume_at > 1500:
+                self._post("seek", resume_at)
+            else:
+                self._loading_pos = False
+            self.qualityChanged.emit(api.QUALITY_LABEL.get(self._quality, self._quality))
+            threading.Thread(target=self._start_cached, args=(token, song), daemon=True).start()
+            return
         self.statusChanged.emit(f"正在获取{api.QUALITY_LABEL.get(self._quality, '')}…")
         threading.Thread(target=self._start, args=(token, song), daemon=True).start()
+
+    def _start_cached(self, token, song):
+        """声音已经从缓存开了。只补歌词，不再等播放地址。"""
+        label = api.QUALITY_LABEL.get(self._quality, self._quality)
+        self.statusChanged.emit(f"正在播放 · {label} · 本机缓存")
+        try:
+            original, translated, words = api.lyric_pair(song["songId"], cookie=self._cookie)
+        except api.ApiError:
+            return
+        if token != self._token:
+            return
+        lines = api.merge_lrc(original, translated)
+        self._lyrics = lines
+        self._lyric_words = words
+        self._post("lyric", "\n".join(f"{ms}\t{text}" for ms, text in lines) or "0\t这首歌没有歌词")
+        self._publish_track()
+        self._publish_desk_lyric(self.player.position()[0])
 
     def _start(self, token, song):
         try:
             info = api.song_url(song["songId"], level=self._quality, cookie=self._cookie)
-            original, translated = api.lyric_pair(song["songId"], cookie=self._cookie)
+            original, translated, words = api.lyric_pair(song["songId"], cookie=self._cookie)
         except api.ApiError as exc:
             if token == self._token:
                 self.statusChanged.emit(str(exc))
@@ -1161,8 +1196,9 @@ class AppBridge(QObject):
         resume_at = getattr(self, "_resume_at", 0)
         self._resume_at = 0
         if resume_at > 1500:
-            threading.Timer(0.7, lambda: self._post("seek", resume_at)).start()
-        self._loading_pos = False
+            self._post("seek", resume_at)
+        else:
+            self._loading_pos = False
         if not cached:
             threading.Thread(
                 target=self._store_cache,
@@ -1176,7 +1212,9 @@ class AppBridge(QObject):
         self.qualityChanged.emit(api.QUALITY_LABEL.get(level, level))
         lines = api.merge_lrc(original, translated)
         self._lyrics = lines
+        self._lyric_words = words
         self._post("lyric", "\n".join(f"{ms}\t{text}" for ms, text in lines) or "0\t这首歌没有歌词")
+        self._publish_track()
         self._publish_desk_lyric(0)
         label = api.QUALITY_LABEL.get(level, level)
         note = "，已换成这首歌能播的档" if level != self._quality else ""
@@ -1233,11 +1271,15 @@ class AppBridge(QObject):
     @pyqtSlot()
     def toggle(self):
         if self.player.want() == "playing":
-            self._post("pause", None)
+            held = self.player.position()[0]
+            self.player.pause()
+            self._publish_desk_lyric(held)
             self.statusChanged.emit("已暂停")
             return
         if self._song and self.player.has_source():
-            self._post("resume", None)
+            held = self.player.position()[0]
+            self.player.resume()
+            self._publish_desk_lyric(held)
             self.statusChanged.emit("继续播放")
             return
         if self._song:
@@ -1272,7 +1314,9 @@ class AppBridge(QObject):
 
     @pyqtSlot(int)
     def seek(self, ms):
-        self._post("seek", int(ms))
+        target = int(ms)
+        self._post("seek", target)
+        self._publish_desk_lyric(target)
 
     @pyqtSlot()
     def cycleMode(self):
@@ -1430,6 +1474,7 @@ class AppBridge(QObject):
             preexec_fn=_arm,
         )
         self.deskLyricChanged.emit(True)
+        self._publish_track()
         self._publish_desk_lyric(self.player.position()[0])
 
     def _lyric_pids(self):
@@ -1521,12 +1566,69 @@ class AppBridge(QObject):
             end = start + 4000
         return text, start, max(start + 1, end)
 
+    def _write_lyric_file(self, path, payload):
+        os.makedirs(DATA_DIR, exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False)
+        os.replace(tmp, path)
+
+    def _publish_track(self):
+        """整首交给歌词窗口。换句和逐字变色都在那边按时间走，不再等这一拍写盘。"""
+        lines = [[int(ms), text] for ms, text in (self._lyrics or []) if text]
+        words = [
+            [int(start), int(end), [[glyph, int(at), int(duration)] for glyph, at, duration in glyphs]]
+            for start, end, glyphs in (getattr(self, "_lyric_words", None) or [])
+        ]
+        payload = {"id": str((self._song or {}).get("songId") or ""), "lines": lines, "words": words}
+        if payload == getattr(self, "_desk_track_payload", None):
+            return
+        self._desk_track_payload = payload
+        try:
+            self._write_lyric_file(LYRIC_TRACK_PATH, payload)
+        except OSError:
+            pass
+
+    def _word_span(self, elapsed):
+        """有逐字时间就按字头切。没有就退回整句时长。"""
+        heard = max(0, int(elapsed))
+        words = getattr(self, "_lyric_words", None) or []
+        chosen = None
+        nearest = None
+        nearest_gap = None
+        for start, end, glyphs in words:
+            if start <= heard:
+                chosen = (start, end, glyphs)
+            gap = abs(start - heard)
+            if nearest is None or gap < nearest_gap:
+                nearest = (start, end, glyphs)
+                nearest_gap = gap
+            elif start > heard and chosen:
+                break
+        if not chosen and nearest and nearest_gap is not None and nearest_gap <= 80:
+            chosen = nearest
+        if not chosen:
+            return None
+        start, end, glyphs = chosen
+        cut = 0
+        for glyph, glyph_at, _duration in glyphs:
+            if glyph_at <= heard:
+                cut += len(glyph)
+            else:
+                break
+        return "".join(glyph for glyph, _at, _duration in glyphs), int(start), int(end), int(cut)
+
     def _publish_desk_lyric(self, elapsed=0, line=None):
+        words = None
         if line is None:
-            text, start, end = self._lyric_span(elapsed)
+            timed = self._word_span(elapsed)
+            if timed:
+                text, start, end, words = timed
+            else:
+                text, start, end = self._lyric_span(elapsed)
         else:
             text, start, end = line, 0, 1
-        playing = self.player.want() == "playing"
+        playing = self.player.want() == "playing" and not self._loading_pos and not self.player._seek_target
         payload = {
             "line": text,
             "start": int(start),
@@ -1535,21 +1637,21 @@ class AppBridge(QObject):
             "at": time.time(),
             "playing": playing,
         }
+        if words is not None:
+            payload["words"] = words
         previous = self._desk_lyric_payload
         if (
             previous
             and previous.get("line") == text
             and previous.get("playing") == playing
-            and abs(previous.get("position", 0) - int(elapsed)) < 250
+            and previous.get("words") == payload.get("words")
+            and playing
+            and abs(previous.get("position", 0) - int(elapsed)) < 400
         ):
             return
         self._desk_lyric_payload = payload
         try:
-            os.makedirs(DATA_DIR, exist_ok=True)
-            tmp = LYRIC_PATH + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as handle:
-                json.dump(payload, handle, ensure_ascii=False)
-            os.replace(tmp, LYRIC_PATH)
+            self._write_lyric_file(LYRIC_PATH, payload)
         except OSError:
             pass
 
@@ -1939,13 +2041,16 @@ class AppBridge(QObject):
 
     def _restore_lyric(self, song_id):
         try:
-            original, translated = api.lyric_pair(song_id, cookie=self._cookie)
+            original, translated, words = api.lyric_pair(song_id, cookie=self._cookie)
         except api.ApiError:
             return
         if str((self._song or {}).get("songId")) != str(song_id):
             return
         lines = api.merge_lrc(original, translated)
         self._lyrics = lines
+        self._lyric_words = words
+        self._publish_track()
+        self._publish_desk_lyric(int(getattr(self, "_resume_at", 0) or 0))
         self._post("lyric", "\n".join(f"{ms}\t{text}" for ms, text in lines) or "0\t这首歌没有歌词")
 
     @pyqtSlot()
@@ -2003,6 +2108,7 @@ class AppBridge(QObject):
         rates = (1.0, 1.25, 1.5, 0.75)
         self._rate = rates[(rates.index(self._rate) + 1) % len(rates)] if self._rate in rates else 1.0
         if self.player.set_rate(self._rate):
+            self.rateChanged.emit(self._rate)
             self.statusChanged.emit(f"播放倍速 {self._rate:g}x")
         else:
             self.statusChanged.emit("当前还不能切换倍速")
@@ -2024,10 +2130,15 @@ class AppBridge(QObject):
         self._show("lyric", (self._song or {}).get("name") or "歌词")
 
     def _on_position(self, pos, dur):
-        if self._loading_pos or self.player.want() != "playing":
+        if self.player.want() != "playing":
             return
+        if self.player._seek_target and abs(pos - self.player._seek_target) > 1500:
+            return
+        self._loading_pos = False
         total = dur or int((self._song or {}).get("duration") or 0)
         self.clockChanged.emit(f"{pos},{total}")
+        if self._desk_lyric_alive():
+            self._publish_desk_lyric(pos)
 
     def _on_ended(self):
         self._step(1)
@@ -2041,5 +2152,7 @@ class AppBridge(QObject):
             return
         pos, dur = self.player.position()
         self.clockChanged.emit(f"{pos},{dur or int((self._song or {}).get('duration') or 0)}")
-        if self._desk_lyric_alive():
+        # 歌词窗口自己按时间切句。这里只偶尔对一次进度，避免暂停和拖动之后越走越偏。
+        if self._desk_lyric_alive() and time.time() - getattr(self, "_lyric_sync_at", 0) >= 2.5:
+            self._lyric_sync_at = time.time()
             self._publish_desk_lyric(pos)

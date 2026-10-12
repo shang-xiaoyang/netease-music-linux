@@ -104,7 +104,8 @@ class PlayerBackend(QObject):
             self._position = keep
             self._duration = 0
             self._anchor = keep
-            self._started_at = time.time()
+            # 管道还没出声。锚点留空，进度停在上次位置，等真正开始再走。
+            self._started_at = 0
             self._want = "playing"
             if not keep:
                 self._seek_target = None
@@ -113,7 +114,7 @@ class PlayerBackend(QObject):
         self.playbin.set_property("volume", 1.0)
         self.playbin.set_state(Gst.State.PLAYING)
         self.stateChanged.emit("playing")
-        self.positionChanged.emit(0, 0)
+        self.positionChanged.emit(keep, 0)
         self._ensure_clock()
 
     @pyqtSlot()
@@ -223,9 +224,15 @@ class PlayerBackend(QObject):
             self.errorChanged.emit(str(err).split("\n", 1)[0])
         elif message.type == Gst.MessageType.ASYNC_DONE and self._want == "playing":
             with self._lock:
-                if self._want == "playing":
+                if self._want == "playing" and not self._seek_target:
                     self._started_at = time.time()
-            self.stateChanged.emit("playing")
+                    position = self._position
+                    duration = self._duration
+                else:
+                    position = None
+            if position is not None:
+                self.stateChanged.emit("playing")
+                self.positionChanged.emit(position, duration)
 
     def _ensure_clock(self):
         if self._clock and self._clock.is_alive():
@@ -235,6 +242,10 @@ class PlayerBackend(QObject):
 
     def _clock_loop(self):
         while self._want in ("playing", "paused"):
+            # 暂停时进度已经停住，不用再问管道。
+            if self._want != "playing":
+                time.sleep(0.4)
+                continue
             pos = dur = 0
             try:
                 ok, value = self.playbin.query_position(Gst.Format.TIME)
@@ -246,7 +257,8 @@ class PlayerBackend(QObject):
             except Exception:
                 pos = dur = 0
             self._store(pos, dur)
-            time.sleep(0.4 if self._want == "playing" else 1.2)
+            # 界面进度按墙钟估算。管道查询只用来校正，不必那么勤。
+            time.sleep(1.0)
 
     def _store(self, pos, dur):
         emit = False
@@ -257,6 +269,7 @@ class PlayerBackend(QObject):
                 self._position = pos
                 self._anchor = pos
                 self._started_at = time.time()
+                self._seek_target = None
                 emit = True
             if dur and dur != self._duration:
                 self._duration = dur

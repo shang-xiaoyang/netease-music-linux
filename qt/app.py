@@ -372,7 +372,20 @@ def main():
         indicator.set_status(AppIndicator.IndicatorStatus.ACTIVE)
         indicator.set_menu(menu)
         indicator.set_activate_target(show)
-        indicator.set_title("网易云音乐")
+
+        def sync_tray_title(payload=""):
+            # 麒麟面板把 AppIndicator 的 Title 当作图标悬浮提示。
+            # 有当前歌曲就显示歌名，暂停也保留；没有歌才回到应用名。
+            name = ""
+            text = str(payload or "")
+            if "\n" in text:
+                name = text.split("\n", 2)[1].strip()
+            elif bridge._song:
+                name = str(bridge._song.get("name") or "").strip()
+            indicator.set_title(name or "网易云音乐")
+
+        sync_tray_title()
+        bridge.songChanged.connect(sync_tray_title)
         app._indicator = indicator
     except Exception:
         pass

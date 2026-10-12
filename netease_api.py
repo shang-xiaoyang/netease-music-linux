@@ -6,12 +6,15 @@
 不绕过会员或付费限制。
 """
 
+import hashlib
 import json
 import os
 import random
 import time
 import urllib.parse
 import urllib.request
+
+from Cryptodome.Cipher import AES
 
 API = "https://music.163.com"
 UA = (
@@ -276,25 +279,204 @@ def vip_info(cookie):
 
 
 def lyric(song_id, cookie=""):
-    payload = request(
-        "/api/song/lyric",
-        {"id": int(song_id), "lv": -1, "tv": -1},
-        cookie=cookie,
-    )
-    return (payload.get("lrc") or {}).get("lyric") or ""
+    original, _translated, _words = lyric_pair(song_id, cookie)
+    return original
 
 
 def lyric_pair(song_id, cookie=""):
-    """原文和翻译。翻译可能为空。"""
-    payload = request(
-        "/api/song/lyric",
-        {"id": int(song_id), "lv": -1, "tv": -1},
-        cookie=cookie,
-    )
+    """原文、翻译和逐字时间。逐字时间可能为空。"""
+    payload = lyric_payload(song_id, cookie)
+    yrc = (payload.get("yrc") or {}).get("lyric") or ""
+    original = (payload.get("lrc") or {}).get("lyric") or ""
+    words = parse_yrc(yrc)
+    if not words and _has_word_times(original):
+        words = parse_yrc(original)
     return (
-        (payload.get("lrc") or {}).get("lyric") or "",
+        lrc_text(original),
         (payload.get("tlyric") or {}).get("lyric") or "",
+        words,
     )
+
+
+def lrc_text(text):
+    """歌词页认 [分:秒] 行。v1 接口的 JSON 行转成同样的格式。"""
+    text = text or ""
+    if not text.strip().startswith("{"):
+        return text
+    lines = []
+    for raw in text.splitlines():
+        raw = raw.strip()
+        if raw.startswith("{"):
+            try:
+                item = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            lyric = "".join(char.get("tx") or "" for char in item.get("c") or []).strip()
+            if lyric:
+                lines.append(f"[{_stamp(int(item.get('t') or 0))}]{lyric}")
+            continue
+        if raw.startswith("["):
+            lines.append(raw)
+    return "\n".join(lines)
+
+
+def _stamp(ms):
+    ms = max(0, int(ms))
+    minute, rest = divmod(ms, 60000)
+    second, milli = divmod(rest, 1000)
+    return f"{minute:02d}:{second:02d}.{milli:03d}"
+
+
+def _has_word_times(text):
+    return "(0," in (text or "") or "\"t\":" in (text or "") and "\"d\":" in (text or "")
+
+
+def lyric_payload(song_id, cookie=""):
+    """网页接口没有逐字时间。桌面歌词用的是加密的 v1 接口。"""
+    try:
+        return _eapi(
+            "/api/song/lyric/v1",
+            {
+                "id": int(song_id),
+                "cp": False,
+                "lv": 0,
+                "tv": 0,
+                "rv": 0,
+                "kv": 0,
+                "yv": 0,
+                "ytv": 0,
+                "yrv": 0,
+            },
+            cookie,
+        )
+    except ApiError:
+        return request(
+            "/api/song/lyric",
+            {"id": int(song_id), "lv": -1, "tv": -1},
+            cookie=cookie,
+        )
+
+
+_EAPI_KEY = b"e82ckenh8dichen8"
+
+
+def _eapi(path, data, cookie=""):
+    """网易云桌面端的加密接口。只用来取歌词，不改播放地址。"""
+    if path != "/api/song/lyric/v1":
+        raise ApiError("只请求网易云音乐歌词接口")
+    text = json.dumps(data, separators=(",", ":"))
+    digest = hashlib.md5(f"nobody{path}use{text}md5forencrypt".encode()).hexdigest()
+    message = f"{path}-36cd479b6b5-{text}-36cd479b6b5-{digest}"
+    padded = message.encode()
+    padded += bytes([16 - len(padded) % 16]) * (16 - len(padded) % 16)
+    params = AES.new(_EAPI_KEY, AES.MODE_ECB).encrypt(padded).hex()
+    url = "https://interface.music.163.com/eapi" + path[4:]
+    req = urllib.request.Request(
+        url,
+        data=urllib.parse.urlencode({"params": params}).encode(),
+        method="POST",
+        headers={
+            "User-Agent": UA,
+            "Referer": "https://music.163.com/",
+            "Cookie": _cookie_header(cookie),
+            "Content-Type": "application/x-www-form-urlencoded",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            raw = resp.read()
+    except urllib.error.HTTPError as exc:
+        raw = exc.read()
+        if not raw:
+            raise ApiError(f"接口返回 {exc.code}") from exc
+    except urllib.error.URLError as exc:
+        raise ApiError(f"网络不可用：{exc.reason}") from exc
+    try:
+        payload = json.loads(raw.decode("utf-8", "replace"))
+    except json.JSONDecodeError as exc:
+        raise ApiError("接口返回的不是 JSON") from exc
+    if isinstance(payload, dict) and payload.get("code") not in (None, 200):
+        raise ApiError(payload.get("message") or payload.get("msg") or f"接口错误 {payload.get('code')}")
+    return payload
+
+
+def parse_yrc(text):
+    """逐字歌词。每句是开始时间、结束时间和每个字的 (字, 开始, 时长)。"""
+    lines = []
+    for raw in (text or "").splitlines():
+        raw = raw.strip()
+        if raw.startswith("{"):
+            parsed = _parse_json_yrc(raw)
+            if parsed:
+                lines.append(parsed)
+            continue
+        if not raw.startswith("[") or "]" not in raw:
+            continue
+        header, rest = raw[1:].split("]", 1)
+        fields = {}
+        for part in header.split(","):
+            if ":" not in part:
+                continue
+            key, value = part.split(":", 1)
+            try:
+                fields[key] = int(value)
+            except ValueError:
+                continue
+        words = []
+        for chunk in rest.split("("):
+            if ")" not in chunk:
+                continue
+            stamp, glyph = chunk.split(")", 1)
+            bits = stamp.split(",")
+            if len(bits) < 2 or not glyph:
+                continue
+            try:
+                start = int(bits[0])
+                duration = int(bits[1])
+            except ValueError:
+                continue
+            words.append((glyph, start, max(1, duration)))
+        if not words:
+            continue
+        if "t" in fields:
+            start = fields["t"]
+            end = start + max(1, fields.get("d") or 1)
+        else:
+            bits = [int(part) for part in header.split(",") if part.lstrip("-").isdigit()]
+            start = bits[0] if bits else words[0][1]
+            end = bits[1] if len(bits) > 1 else start + words[-1][2]
+        lines.append((start, max(start + 1, end), words))
+    lines.sort()
+    return lines
+
+
+def _parse_json_yrc(raw):
+    try:
+        item = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    chars = item.get("c") or []
+    words = []
+    cursor = int(item.get("t") or 0)
+    for char in chars:
+        glyph = char.get("tx") or ""
+        if not glyph:
+            continue
+        start = char.get("t")
+        duration = char.get("d")
+        if start is None:
+            start = cursor
+        if duration is None:
+            duration = 1
+        words.append((glyph, int(start), max(1, int(duration))))
+        cursor = int(start) + max(1, int(duration))
+    if not words or not any("t" in char or "d" in char for char in chars):
+        return None
+    start = int(item.get("t") or words[0][1])
+    end = int(item.get("t") or 0) + max(1, int(item.get("d") or 1))
+    if end <= start:
+        end = words[-1][1] + words[-1][2]
+    return start, max(start + 1, end), words
 
 
 def like_song(song_id, like, cookie):

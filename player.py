@@ -46,6 +46,7 @@ QUALITY_PATH = os.path.join(DATA_DIR, "quality")
 VOLUME_PATH = os.path.join(DATA_DIR, "volume")
 WINDOW_PATH = os.path.join(DATA_DIR, "window.json")
 LYRIC_PATH = os.path.join(DATA_DIR, "desk-lyric.json")
+LYRIC_TRACK_PATH = os.path.join(DATA_DIR, "desk-lyric-track.json")
 LYRIC_POS_PATH = os.path.join(DATA_DIR, "desk-lyric-pos.json")
 LYRIC_STATE_PATH = os.path.join(DATA_DIR, "desk-lyric-state.json")
 STATE_PATH = os.path.join(DATA_DIR, "state.json")
@@ -248,16 +249,26 @@ button.feature-card:hover {{
 }}
 .desk-lyric-plate {{
     background: rgba(232, 232, 234, 0.78);
-    border-radius: 8px;
+    border-radius: 6px;
 }}
-.desk-lyric-close {{
+.desk-lyric-close, .desk-lyric-lock {{
     color: #F3A3A3;
-    background: rgba(255, 255, 255, 0.55);
+    background: rgba(255, 255, 255, 0.72);
     border-radius: 11px;
-    font-size: 15px;
-    font-weight: 700;
-    min-width: 21px;
-    min-height: 21px;
+    min-width: 22px;
+    min-height: 22px;
+    padding: 0;
+}}
+.desk-lyric-lock {{
+    color: #FFFFFF;
+    background: rgba(44, 44, 52, 0.55);
+}}
+.desk-lyric-unlock {{
+    color: #FFFFFF;
+    background: rgba(44, 44, 52, 0.72);
+    border-radius: 12px;
+    min-width: 24px;
+    min-height: 24px;
     padding: 0;
 }}
 .time-pill {{
@@ -945,10 +956,7 @@ class Player:
         return self._want == "playing"
 
     def paused(self):
-        if self._want == "paused":
-            return True
-        _ok, state, _pending = self.playbin.get_state(0)
-        return state == Gst.State.PAUSED
+        return self._want == "paused"
 
     def position_ms(self):
         # 界面线程只读缓存。管道查询会卡住界面，放到后台线程里做。
@@ -969,6 +977,10 @@ class Player:
 
         def work():
             while self._want in ("playing", "paused"):
+                # 暂停时进度已经停住，不用再问管道。
+                if self._want != "playing":
+                    time.sleep(0.4)
+                    continue
                 pos = dur = 0
                 try:
                     ok, value = self.playbin.query_position(Gst.Format.TIME)
@@ -980,7 +992,8 @@ class Player:
                 except Exception:
                     pass
                 GLib.idle_add(self._store_clock, pos, dur)
-                time.sleep(0.4 if self._want == "playing" else 1.2)
+                # 界面进度按墙钟估算。管道查询只用来校正，不必那么勤。
+                time.sleep(1.0)
             self._querying = False
 
         self._clock_thread = threading.Thread(target=work, daemon=True)
@@ -1097,7 +1110,7 @@ class AppWindow(Gtk.ApplicationWindow):
         self.connect("key-press-event", self._on_key)
         self.connect("button-press-event", self._on_window_press)
         self.connect("configure-event", self._remember_window)
-        GLib.timeout_add(400, self._tick)
+        GLib.timeout_add(1000, self._tick)
         self.show_all()
         self._clamp_window()
         if self._desk_lyric_wanted():
@@ -4058,11 +4071,12 @@ class AppWindow(Gtk.ApplicationWindow):
     def _start_song(self, song):
         try:
             info = api.song_url(song["id"], level=self.quality, cookie=self.cookie)
-            original, translated = api.lyric_pair(song["id"], cookie=self.cookie)
+            original, translated, words = api.lyric_pair(song["id"], cookie=self.cookie)
         except api.ApiError as exc:
             GLib.idle_add(self._status, str(exc))
             return
         lines = api.merge_lrc(original, translated)
+        self._lyric_words = words
         local = self._local_file(song)
         if local:
             info = {
@@ -4189,9 +4203,43 @@ class AppWindow(Gtk.ApplicationWindow):
             end = start + 4000
         return text, start, max(start + 1, end)
 
+    def _word_span(self, elapsed):
+        """有逐字时间就按字头切。没有就退回整句时长。"""
+        heard = max(0, int(elapsed))
+        words = getattr(self, "_lyric_words", None) or []
+        chosen = None
+        nearest = None
+        nearest_gap = None
+        for start, end, glyphs in words:
+            if start <= heard:
+                chosen = (start, end, glyphs)
+            gap = abs(start - heard)
+            if nearest is None or gap < nearest_gap:
+                nearest = (start, end, glyphs)
+                nearest_gap = gap
+            elif start > heard and chosen:
+                break
+        if not chosen and nearest and nearest_gap is not None and nearest_gap <= 80:
+            chosen = nearest
+        if not chosen:
+            return None
+        start, end, glyphs = chosen
+        cut = 0
+        for glyph, glyph_at, _duration in glyphs:
+            if glyph_at <= heard:
+                cut += len(glyph)
+            else:
+                break
+        return "".join(glyph for glyph, _at, _duration in glyphs), int(start), int(end), int(cut)
+
     def _publish_desk_lyric(self, elapsed=0):
-        """只在换句时写文件。颜色进度由歌词窗口按时间自己往前走，不再每拍读盘。"""
-        line, start, end = self._lyric_span(elapsed)
+        """只在换句、换字或暂停时写文件。没有逐字时间时，颜色由歌词窗口按整句时长往前走。"""
+        timed = self._word_span(elapsed)
+        if timed:
+            line, start, end, words = timed
+        else:
+            line, start, end = self._lyric_span(elapsed)
+            words = None
         playing = bool(self.player.playing())
         payload = {
             "line": line,
@@ -4201,12 +4249,16 @@ class AppWindow(Gtk.ApplicationWindow):
             "at": time.time(),
             "playing": playing,
         }
+        if words is not None:
+            payload["words"] = words
         previous = getattr(self, "_desk_lyric_payload", None)
         if (
             previous
             and previous.get("line") == line
             and previous.get("playing") == playing
-            and abs(previous.get("position", 0) - int(elapsed)) < 800
+            and previous.get("words") == payload.get("words")
+            and playing
+            and abs(previous.get("position", 0) - int(elapsed)) < 400
         ):
             return
         self._desk_lyric_payload = payload
@@ -4221,6 +4273,8 @@ class AppWindow(Gtk.ApplicationWindow):
 
     def _on_player_state(self, _want):
         self._sync_play_icon()
+        if self.current_song:
+            self._publish_desk_lyric(self.player.position_ms())
         return False
 
     def _sync_play_icon(self):
@@ -4333,7 +4387,9 @@ class AppWindow(Gtk.ApplicationWindow):
                 self.scale.set_value(min(1000, shown * 1000 / total))
             self._place_time_pill(shown, total)
             self._highlight_lyric(shown if self.seeking else elapsed)
-            self._publish_desk_lyric(shown if self.seeking else elapsed)
+            # 歌词窗口自己按时间走。这里只在暂停、拖动时写，避免每秒写一次文件。
+            if not playing or self.seeking:
+                self._publish_desk_lyric(shown if self.seeking else elapsed)
         elif song and getattr(self, "_resume_at", 0) and not playing:
             self._show_paused_progress()
         return True
@@ -4818,15 +4874,6 @@ class MusicApp(Gtk.Application):
         self.quit()
 
 
-def _ui_scale():
-    """UKUI 的界面缩放。Wayland 会自己乘上，XWayland 不会，歌词窗口要补上。"""
-    try:
-        value = float(Gio.Settings.new("org.ukui.SettingsDaemon.plugins.xsettings").get_double("scaling-factor"))
-    except (GLib.Error, TypeError, ValueError):
-        value = 1.0
-    return value if value >= 1 else 1.0
-
-
 def _launch_desk_lyric():
     """桌面歌词单独走 XWayland。主进程留在 Wayland，窗口才能跟上系统缩放。"""
     env = os.environ.copy()
@@ -4836,9 +4883,150 @@ def _launch_desk_lyric():
     return subprocess.Popen(["/usr/bin/python3", os.path.abspath(__file__), "--desk-lyric"], env=env)
 
 
+class _LyricX11:
+    """XWayland 下 GTK 坐标是逻辑像素，窗口实际按物理像素摆。定位和拖动都走 X11。"""
+
+    ShapeInput = 2
+    ShapeSet = 0
+
+    def __init__(self):
+        self._x11 = None
+        self._xext = None
+        self._display = None
+        self._root = 0
+
+    def open(self):
+        if self._display:
+            return True
+        try:
+            import ctypes
+            x11 = ctypes.CDLL("libX11.so.6")
+            xext = ctypes.CDLL("libXext.so.6")
+        except OSError:
+            return False
+        x11.XOpenDisplay.restype = ctypes.c_void_p
+        x11.XOpenDisplay.argtypes = [ctypes.c_char_p]
+        x11.XDefaultScreen.argtypes = [ctypes.c_void_p]
+        x11.XDefaultScreen.restype = ctypes.c_int
+        x11.XRootWindow.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        x11.XRootWindow.restype = ctypes.c_ulong
+        x11.XDisplayWidth.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        x11.XDisplayWidth.restype = ctypes.c_int
+        x11.XDisplayHeight.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        x11.XDisplayHeight.restype = ctypes.c_int
+        x11.XMoveWindow.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int, ctypes.c_int]
+        x11.XFlush.argtypes = [ctypes.c_void_p]
+        x11.XQueryPointer.restype = ctypes.c_int
+        x11.XQueryPointer.argtypes = [
+            ctypes.c_void_p, ctypes.c_ulong,
+            ctypes.POINTER(ctypes.c_ulong), ctypes.POINTER(ctypes.c_ulong),
+            ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int),
+            ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int),
+            ctypes.POINTER(ctypes.c_uint),
+        ]
+        x11.XTranslateCoordinates.restype = ctypes.c_int
+        x11.XTranslateCoordinates.argtypes = [
+            ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_int, ctypes.c_int,
+            ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_ulong),
+        ]
+        class XRectangle(ctypes.Structure):
+            _fields_ = [
+                ("x", ctypes.c_short), ("y", ctypes.c_short),
+                ("width", ctypes.c_ushort), ("height", ctypes.c_ushort),
+            ]
+
+        xext.XShapeCombineRectangles.argtypes = [
+            ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+            ctypes.POINTER(XRectangle), ctypes.c_int, ctypes.c_int, ctypes.c_int,
+        ]
+        display = x11.XOpenDisplay(None)
+        if not display:
+            return False
+        self._x11 = x11
+        self._xext = xext
+        self._rect_type = XRectangle
+        self._ctypes = ctypes
+        self._display = display
+        screen = x11.XDefaultScreen(display)
+        self._root = x11.XRootWindow(display, screen)
+        self._screen_w = int(x11.XDisplayWidth(display, screen))
+        self._screen_h = int(x11.XDisplayHeight(display, screen))
+        return True
+
+    def screen(self, window):
+        if not self.open():
+            return 1440, 900, 1
+        scale = 1
+        gdk_window = window.get_window()
+        if gdk_window is not None:
+            scale = max(1, int(gdk_window.get_scale_factor() or 1))
+        return self._screen_w, self._screen_h, scale
+
+    def origin(self, window):
+        gdk_window = window.get_window()
+        if not self.open() or gdk_window is None:
+            x, y = window.get_position()
+            return int(x), int(y)
+        rx = self._ctypes.c_int()
+        ry = self._ctypes.c_int()
+        child = self._ctypes.c_ulong()
+        self._x11.XTranslateCoordinates(
+            self._display, gdk_window.get_xid(), self._root, 0, 0,
+            self._ctypes.byref(rx), self._ctypes.byref(ry), self._ctypes.byref(child),
+        )
+        return int(rx.value), int(ry.value)
+
+    def move(self, window, x, y):
+        gdk_window = window.get_window()
+        if not self.open() or gdk_window is None:
+            window.move(int(x), int(y))
+            return
+        self._x11.XMoveWindow(self._display, gdk_window.get_xid(), int(x), int(y))
+        self._x11.XFlush(self._display)
+
+    def pointer(self):
+        if not self.open():
+            return None
+        root_ret = self._ctypes.c_ulong()
+        child = self._ctypes.c_ulong()
+        rx = self._ctypes.c_int()
+        ry = self._ctypes.c_int()
+        wx = self._ctypes.c_int()
+        wy = self._ctypes.c_int()
+        mask = self._ctypes.c_uint()
+        ok = self._x11.XQueryPointer(
+            self._display, self._root,
+            self._ctypes.byref(root_ret), self._ctypes.byref(child),
+            self._ctypes.byref(rx), self._ctypes.byref(ry),
+            self._ctypes.byref(wx), self._ctypes.byref(wy),
+            self._ctypes.byref(mask),
+        )
+        if not ok:
+            return None
+        return int(rx.value), int(ry.value)
+
+    def input_rects(self, window, rects):
+        """锁定时只留解锁按钮能点，其余点击穿透到下面的窗口。"""
+        gdk_window = window.get_window()
+        if not self.open() or gdk_window is None:
+            return
+        count = len(rects)
+        array = (self._rect_type * count)()
+        for index, (x, y, w, h) in enumerate(rects):
+            array[index].x = int(x)
+            array[index].y = int(y)
+            array[index].width = max(0, int(w))
+            array[index].height = max(0, int(h))
+        self._xext.XShapeCombineRectangles(
+            self._display, gdk_window.get_xid(), self.ShapeInput, 0, 0,
+            array if count else None, count, self.ShapeSet, 0,
+        )
+        self._x11.XFlush(self._display)
+
+
 def _run_desk_lyric():
-    """无边框歌词层。悬停才显示半透明底和关闭按钮，松手后记住位置。"""
-    scale = _ui_scale()
+    """无边框歌词层。悬停才显示按钮，松手记住物理像素位置。锁定后点击穿透。"""
+    x11 = _LyricX11()
     window = Gtk.Window(type=Gtk.WindowType.TOPLEVEL)
     window.set_title("桌面歌词")
     titlebar = Gtk.Box()
@@ -4851,7 +5039,8 @@ def _run_desk_lyric():
     window.set_accept_focus(True)
     window.set_type_hint(Gdk.WindowTypeHint.UTILITY)
     window.set_app_paintable(True)
-    width, height = 760, 64
+    width, height = 560, 44
+    font = "Sans Bold 15"
     window.set_size_request(width, height)
     window.set_default_size(width, height)
     window.set_resizable(False)
@@ -4864,61 +5053,119 @@ def _run_desk_lyric():
     plate.get_style_context().add_class("desk-lyric-plate")
     plate.set_no_show_all(True)
     plate.hide()
+    # 文字标签由 GTK 按屏幕像素绘制，不会被位图再放大裁掉。已唱更深的蓝，未唱白色加一圈反边。
+    lyric_box = Gtk.Fixed()
+    lyric_box.set_size_request(width, height)
+    lyric_box.set_sensitive(False)
+    halos = []
+    for _dx, _dy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+        item = Gtk.Label()
+        item.set_sensitive(False)
+        halos.append(item)
+        lyric_box.put(item, 0, 0)
     label = Gtk.Label()
-    label.set_ellipsize(Pango.EllipsizeMode.END)
-    label.set_margin_start(28)
-    label.set_margin_end(28)
-    label.set_margin_top(0)
-    label.set_margin_bottom(0)
-    label.set_size_request(width - 56, height)
     label.set_sensitive(False)
+    lyric_box.put(label, 0, 0)
     window._line = ""
     window._cut = -1
     window._widths = {}
+    window._halos = halos
+    window._fill = label
     window._clock = {"line": "暂无歌词", "start": 0, "end": 1, "position": 0, "at": time.time(), "playing": False}
+    window._track = {"lines": [], "words": []}
+    window._track_stamp = 0
+    window._clock_stamp = 0
+    window._monitors = []
+    window._locked = False
+    window._inside = False
+    actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
+    actions.set_halign(Gtk.Align.END)
+    actions.set_valign(Gtk.Align.START)
+    actions.set_margin_top(4)
+    actions.set_margin_end(4)
+    actions.set_no_show_all(True)
+    actions.hide()
+    lock = Gtk.Button()
+    lock.set_relief(Gtk.ReliefStyle.NONE)
+    lock.get_style_context().add_class("desk-lyric-lock")
+    lock.set_image(Gtk.Image.new_from_icon_name("changes-prevent-symbolic", Gtk.IconSize.MENU))
+    lock.set_always_show_image(True)
+    lock.set_size_request(22, 22)
+    lock.set_tooltip_text("锁定，点击穿透")
     close = Gtk.Button(label="×")
     close.set_relief(Gtk.ReliefStyle.NONE)
     close.get_style_context().add_class("desk-lyric-close")
-    close.set_halign(Gtk.Align.END)
-    close.set_valign(Gtk.Align.START)
-    close.set_margin_top(6)
-    close.set_margin_end(6)
-    close.set_no_show_all(True)
-    close.hide()
+    close.set_size_request(22, 22)
+    close.set_tooltip_text("关闭桌面歌词")
+    actions.pack_start(lock, False, False, 0)
+    actions.pack_start(close, False, False, 0)
+    unlock = Gtk.Button()
+    unlock.set_relief(Gtk.ReliefStyle.NONE)
+    unlock.get_style_context().add_class("desk-lyric-unlock")
+    unlock.set_image(Gtk.Image.new_from_icon_name("padlock-open-symbolic", Gtk.IconSize.MENU))
+    unlock.set_always_show_image(True)
+    unlock.set_size_request(24, 24)
+    unlock.set_halign(Gtk.Align.CENTER)
+    unlock.set_valign(Gtk.Align.CENTER)
+    unlock.set_no_show_all(True)
+    unlock.set_tooltip_text("解锁，恢复拖动")
+    unlock.hide()
     overlay.add(plate)
-    overlay.add_overlay(label)
-    overlay.add_overlay(close)
+    overlay.add_overlay(lyric_box)
+    overlay.add_overlay(unlock)
+    overlay.add_overlay(actions)
+    # 合成器会在客户区外再加一圈边框。点击区域按实测偏移算。
+    window._frame = (0, 0)
 
-    def paint_line(text, fraction):
-        """已唱部分淡蓝，后面白色。唱到这个字的开头就变色，不等这个字唱完。"""
+    def measure_line(text):
+        layout = label.create_pango_layout(text or "")
+        layout.set_font_description(Pango.FontDescription(font))
+        return layout.get_pixel_size()[0]
+
+    def place_line(sung_width, rest_width):
+        origin_x = max(0, (width - sung_width - rest_width) // 2)
+        origin_y = max(0, (height - 30) // 2)
+        lyric_box.move(label, origin_x, origin_y)
+        for item, (dx, dy) in zip(halos, ((-1, 0), (1, 0), (0, -1), (0, 1))):
+            lyric_box.move(item, origin_x + sung_width + dx, origin_y + dy)
+
+    def paint_line(text, fraction, word_cut=None):
+        """唱到这个字的开头就变色。有逐字时间用字数，没有才按整句时长匀。"""
         text = text or "暂无歌词"
         fraction = max(0.0, min(0.999, fraction))
-        widths = window._widths.get(text) if text == window._line else None
+        widths = window._widths.get(text)
         if not widths or len(widths) != len(text) + 1:
-            layout = label.create_pango_layout(text)
-            layout.set_font_description(Pango.FontDescription("Sans Bold 18"))
-            widths = [0]
-            for index in range(1, len(text) + 1):
-                layout.set_text(text[:index], -1)
-                widths.append(layout.get_pixel_size()[0])
+            widths = [measure_line(text[:index]) for index in range(len(text) + 1)]
             window._widths[text] = widths
             if len(window._widths) > 8:
                 window._widths.pop(next(iter(window._widths)))
-        target = widths[-1] * fraction
-        cut = 0
-        for index, width in enumerate(widths):
-            if index and widths[index - 1] > target + 1:
-                break
-            cut = index
+        if word_cut is None:
+            target = widths[-1] * fraction
+            cut = 0
+            for index, pixel in enumerate(widths):
+                if index and widths[index - 1] > target + 1:
+                    break
+                cut = index
+        else:
+            cut = max(0, min(len(text), int(word_cut)))
         if text == window._line and cut == window._cut:
             return
         window._line = text
         window._cut = cut
-        markup = (
-            f'<span font="Sans Bold 18" foreground="#9EC7F2">{GLib.markup_escape_text(text[:cut])}</span>'
-            f'<span font="Sans Bold 18" foreground="#FFFFFF">{GLib.markup_escape_text(text[cut:])}</span>'
+        sung = GLib.markup_escape_text(text[:cut])
+        rest = GLib.markup_escape_text(text[cut:])
+        # 已唱只画一层蓝，不垫描边。描边只跟在未唱的白字后面。
+        label.set_markup(
+            "<span font=\"" + font + "\">"
+            "<span foreground=\"#2E74C4\">" + sung + "</span>"
+            "<span foreground=\"#FFFFFF\">" + rest + "</span>"
+            "</span>"
         )
-        label.set_markup(markup)
+        edge = "<span font=\"" + font + "\"><span foreground=\"#1C2434\">" + rest + "</span></span>"
+        for item in halos:
+            item.set_markup(edge)
+        place_line(widths[cut], widths[-1] - widths[cut])
+
     window.add(overlay)
     window.add_events(
         Gdk.EventMask.BUTTON_PRESS_MASK
@@ -4935,60 +5182,201 @@ def _run_desk_lyric():
     window._placed = False
     window._drag = None
 
-    def saved_position():
+    def read_position():
         try:
             payload = json.loads(open(LYRIC_POS_PATH, encoding="utf-8").read())
-            return int(payload["x"]), int(payload["y"])
+            return int(payload["x"]), int(payload["y"]), int(payload.get("scale") or 0)
         except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
             return None
 
-    def remember():
-        x, y = window.get_position()
+    def write_position(x, y):
+        _screen_w, _screen_h, scale = x11.screen(window)
+        window._xy = (int(x), int(y))
         try:
             os.makedirs(DATA_DIR, exist_ok=True)
             tmp = LYRIC_POS_PATH + ".tmp"
             with open(tmp, "w", encoding="utf-8") as handle:
-                json.dump({"x": int(x), "y": int(y)}, handle)
+                json.dump({"x": int(x), "y": int(y), "scale": int(scale)}, handle)
             os.replace(tmp, LYRIC_POS_PATH)
         except OSError:
             pass
 
+    def remember():
+        write_position(*getattr(window, "_xy", x11.origin(window)))
+
+    def frame_size():
+        """客户区在外框里的偏移。XWayland 上通常是 0，主题边框出现时再补上。"""
+        gdk_window = window.get_window()
+        if gdk_window is None:
+            return window._frame
+        origin_x, origin_y = x11.origin(window)
+        alloc = window.get_allocation()
+        _, abs_x, abs_y = gdk_window.get_origin()
+        left = int(round(origin_x - (abs_x - alloc.x)))
+        top = int(round(origin_y - (abs_y - alloc.y)))
+        if 0 <= left <= 64 and 0 <= top <= 64:
+            window._frame = (left, top)
+        return window._frame
+
+    def fit(x, y):
+        screen_w, screen_h, scale = x11.screen(window)
+        left, top = frame_size()
+        pixel_w = width * scale + left
+        pixel_h = height * scale + top
+        x = min(max(0, int(x)), max(0, screen_w - pixel_w))
+        y = min(max(0, int(y)), max(0, screen_h - pixel_h))
+        return x, y
+
     def place(*_args):
         if window._placed:
             return False
-        saved = saved_position()
+        screen_w, screen_h, scale = x11.screen(window)
+        saved = read_position()
         if saved is not None:
-            window.move(*saved)
+            x, y, saved_scale = saved
+            # 没有 scale 的旧文件是 GTK 逻辑坐标，按 1 倍换算到当前物理像素。
+            if saved_scale < 1:
+                saved_scale = 1
+            if saved_scale != scale:
+                x = int(round(x * scale / saved_scale))
+                y = int(round(y * scale / saved_scale))
+            target = fit(x, y)
+            x11.move(window, *target)
+            write_position(*target)
         else:
             try:
-                panel = int(Gio.Settings.new("org.ukui.panel.settings").get_int("panelsize") or 48)
+                panel = int(Gio.Settings.new("org.ukui.panel.settings").get_int("panelsize") or 46)
             except (GLib.Error, TypeError, ValueError):
-                panel = 48
-            screen_w, screen_h = 1646, 1029
-            monitor = window.get_display().get_monitor(0)
-            if monitor is not None:
-                geom = monitor.get_geometry()
-                logical_w = geom.width / max(scale, 1)
-                if 800 < logical_w < 2200:
-                    screen_w, screen_h = logical_w, geom.height / max(scale, 1)
-            window.move(int(max(0, (screen_w - width) // 2)), int(max(0, screen_h - panel - height - 8)))
+                panel = 46
+            target = fit((screen_w - width * scale) // 2, screen_h - panel * scale - height * scale - 8 * scale)
+            x11.move(window, *target)
+            write_position(*target)
         window.resize(width, height)
         window.set_size_request(width, height)
         window._placed = True
         return False
 
     def show_chrome(shown):
+        window._inside = bool(shown)
+        if window._locked:
+            plate.hide()
+            actions.hide()
+            lock.hide()
+            close.hide()
+            return
+        unlock.hide()
         if shown:
             plate.show()
+            actions.show()
+            lock.show()
             close.show()
         else:
             plate.hide()
-            close.hide()
+            actions.hide()
+
+    def button_box(widget):
+        """按钮在客户区里的范围。分配坐标在 XWayland 上会偏一圈边框，改用相对位置。"""
+        translated = widget.translate_coordinates(window, 0, 0)
+        alloc = widget.get_allocation()
+        if translated is None:
+            return int(alloc.x), int(alloc.y), int(alloc.width), int(alloc.height)
+        return int(translated[0]), int(translated[1]), int(alloc.width), int(alloc.height)
+
+    def event_scale():
+        """XWayland 把物理像素事件折成一半。热区按这个比例留，点击才能落到按钮上。"""
+        return max(1, x11.screen(window)[2])
+
+    def show_unlock(shown):
+        if not window._locked:
+            unlock.hide()
+            return
+        if shown:
+            unlock.show()
+            GLib.idle_add(apply_input)
+            return
+        unlock.hide()
+        x11.input_rects(window, [])
+
+    def apply_input():
+        if not window._locked or not unlock.get_visible():
+            return False
+        left, top = frame_size()
+        x, y, w, h = button_box(unlock)
+        if w <= 1 or h <= 1:
+            return False
+        ratio = event_scale()
+        x11.input_rects(window, [(
+            int(left + max(0, x - 4) * ratio),
+            int(top + max(0, y - 4) * ratio),
+            int((w + 8) * ratio),
+            int((h + 8) * ratio),
+        )])
+        return False
+
+    def set_locked(locked):
+        window._locked = bool(locked)
+        window._drag = None
+        if window._locked:
+            show_chrome(False)
+            show_unlock(False)
+            return
+        show_unlock(False)
+        show_chrome(False)
+        x11.input_rects(window, [(0, 0, width * 8, height * 8)])
+
+    def pointer_widget():
+        """事件坐标在这块 XWayland 上只有物理像素的一半，按钮命中改用指针换算。"""
+        gdk_window = window.get_window()
+        pointer = x11.pointer()
+        if gdk_window is None or pointer is None:
+            return None
+        origin_x, origin_y = x11.origin(window)
+        ratio = event_scale()
+        left, top = frame_size()
+        return (
+            (pointer[0] - origin_x - left) / ratio,
+            (pointer[1] - origin_y - top) / ratio,
+        )
+
+    def hit_button(widget, pad=4):
+        point = pointer_widget()
+        x, y, w, h = button_box(widget)
+        if point is None or w <= 1 or h <= 1:
+            return False
+        return x - pad <= point[0] < x + w + pad and y - pad <= point[1] < y + h + pad
+
+    def handle_click():
+        if not window._locked and hit_button(lock):
+            set_locked(True)
+            return True
+        if window._locked:
+            return True
+        if hit_button(close):
+            window.hide()
+            Gtk.main_quit()
+            return True
+        return False
 
     def press(widget, event):
-        if event.button != 1 or event.type == Gdk.EventType._2BUTTON_PRESS:
+        if event.button != 1:
             return True
-        widget._drag = (event.x_root, event.y_root, *widget.get_position())
+        if window._locked and event.type == Gdk.EventType._2BUTTON_PRESS:
+            if hit_button(unlock):
+                set_locked(False)
+            return True
+        if event.type == Gdk.EventType._2BUTTON_PRESS:
+            return True
+        if not actions.get_visible():
+            show_chrome(True)
+            GLib.timeout_add(50, handle_click)
+            return True
+        if handle_click():
+            return True
+        pointer = x11.pointer()
+        origin = x11.origin(widget)
+        if pointer is None:
+            return True
+        widget._drag = (*pointer, *origin)
         widget._placed = True
         seat = widget.get_display().get_default_seat()
         if seat is not None and window.get_window() is not None:
@@ -5006,47 +5394,166 @@ def _run_desk_lyric():
 
     def motion(widget, event):
         drag = widget._drag
-        if not drag:
-            show_chrome(True)
+        if window._locked or not drag:
+            if not window._locked and not window._inside:
+                show_chrome(True)
             return False
         x0, y0, wx, wy = drag
-        widget.move(int(wx + event.x_root - x0), int(wy + event.y_root - y0))
+        pointer = x11.pointer()
+        if pointer is None:
+            return True
+        widget._xy = fit(wx + pointer[0] - x0, wy + pointer[1] - y0)
+        x11.move(widget, *widget._xy)
+        return True
+
+    def file_stamp(path):
+        try:
+            return os.stat(path).st_mtime_ns
+        except OSError:
+            return 0
+
+    def load_track():
+        stamp = file_stamp(LYRIC_TRACK_PATH)
+        if stamp == window._track_stamp:
+            return True
+        window._track_stamp = stamp
+        try:
+            payload = json.loads(open(LYRIC_TRACK_PATH, encoding="utf-8").read())
+        except (OSError, json.JSONDecodeError):
+            return True
+        if payload != window._track:
+            window._track = payload
+            advance()
         return True
 
     def refresh():
+        stamp = file_stamp(LYRIC_PATH)
+        if stamp == window._clock_stamp:
+            return True
+        window._clock_stamp = stamp
         try:
             payload = json.loads(open(LYRIC_PATH, encoding="utf-8").read())
-            window._clock = payload
         except (OSError, json.JSONDecodeError):
-            payload = window._clock
+            return True
+        previous = window._clock or {}
+        window._clock = payload
+        # 暂停、拖动、继续都在文件一到时立刻跟上，不等下一次变色。
+        if previous.get("playing") != payload.get("playing") or not payload.get("playing"):
+            advance()
         return True
 
+    def local_span(position):
+        """整首在本进程里切。到点就换下一句，不等主程序再写一次文件。"""
+        lines = window._track.get("lines") or []
+        heard = max(0, int(position))
+        index = -1
+        for i, item in enumerate(lines):
+            if len(item) < 2 or not item[1]:
+                continue
+            if int(item[0]) <= heard:
+                index = i
+            elif int(item[0]) > heard:
+                break
+        if index < 0:
+            return None
+        start = int(lines[index][0])
+        text = lines[index][1]
+        end = int(lines[index + 1][0]) if index + 1 < len(lines) else start + 4000
+        word_cut = word_cut_at(window._track.get("words") or [], heard, start, text)
+        return text, start, max(start + 1, end), word_cut
+
+    def word_cut_at(words, heard, start, text):
+        """按这个字自己的开始时间切，不按整句时长匀。时间对不上就找最近的一句。"""
+        chosen = None
+        nearest = None
+        nearest_gap = None
+        for item in words:
+            if len(item) < 3:
+                continue
+            gap = abs(int(item[0]) - start)
+            if nearest is None or gap < nearest_gap:
+                nearest = item
+                nearest_gap = gap
+            if int(item[0]) == start:
+                chosen = item
+                break
+        if chosen is None and nearest is not None and nearest_gap is not None and nearest_gap <= 500:
+            glyphs = nearest[2]
+            timed = "".join(glyph[0] for glyph in glyphs if glyph).replace(" ", "")
+            if timed == (text or "").replace(" ", "") or nearest_gap <= 80:
+                chosen = nearest
+        if chosen is None:
+            return None
+        cut = 0
+        for glyph in chosen[2]:
+            if len(glyph) < 2 or int(glyph[1]) > heard:
+                break
+            cut += len(glyph[0])
+        return cut
+
+    def hover():
+        """锁定后点击穿透，悬停事件也没了。指针走到歌词中间才露出解锁图标。"""
+        if not window._locked:
+            return True
+        point = pointer_widget()
+        if point is None:
+            return True
+        show_unlock(abs(point[0] - width / 2) <= 36 and abs(point[1] - height / 2) <= 16)
+        return True
+
+    def watch_files():
+        """文件一变就读。平时不再按固定间隔去查磁盘。"""
+        for path, handler in ((LYRIC_TRACK_PATH, load_track), (LYRIC_PATH, refresh)):
+            try:
+                monitor = Gio.File.new_for_path(path).monitor_file(Gio.FileMonitorFlags.NONE, None)
+            except GLib.Error:
+                continue
+            monitor.connect("changed", lambda *_args, fn=handler: fn())
+            window._monitors.append(monitor)
+        load_track()
+        refresh()
+
     def advance():
-        """颜色在本进程里按时间往前走。读文件只负责换句，避免每个字都等一次磁盘。"""
+        """整首在本进程按时间切句、变色。暂停只用文件里的进度，不再自己往前涂。"""
         clock = window._clock or {}
-        line = clock.get("line") or "暂无歌词"
-        start = int(clock.get("start") or 0)
-        end = int(clock.get("end") or start + 1)
         position = int(clock.get("position") or 0)
         if clock.get("playing"):
             position += int((time.time() - float(clock.get("at") or time.time())) * 1000)
+        local = local_span(position) if window._track.get("lines") else None
+        if local:
+            line, start, end, word_cut = local
+        else:
+            line = clock.get("line") or "暂无歌词"
+            start = int(clock.get("start") or 0)
+            end = int(clock.get("end") or start + 1)
+            word_cut = clock.get("words")
+            if not clock.get("playing"):
+                position = int(clock.get("position") or 0)
         span = max(1, end - start)
         fraction = max(0.0, min(1.0, (position - start) / span))
-        paint_line(line, fraction)
+        paint_line(line, fraction, word_cut)
         return True
 
+    def leave(_widget, event):
+        if getattr(event, "detail", None) == Gdk.NotifyType.INFERIOR:
+            return False
+        show_chrome(False)
+        return False
+
+    lock.connect("clicked", lambda *_: set_locked(not window._locked))
     close.connect("clicked", lambda *_: (window.hide(), Gtk.main_quit()))
-    window.connect("realize", place)
+    window.connect("map-event", place)
     window.connect("enter-notify-event", lambda *_: show_chrome(True))
-    window.connect("leave-notify-event", lambda *_: show_chrome(False))
+    window.connect("leave-notify-event", leave)
     window.connect("button-press-event", press)
     window.connect("button-release-event", release)
     window.connect("motion-notify-event", motion)
     window.show_all()
-    close.hide()
+    actions.hide()
     plate.hide()
-    GLib.timeout_add(250, refresh)
+    watch_files()
     GLib.timeout_add(40, advance)
+    GLib.timeout_add(160, hover)
     Gtk.main()
 
 

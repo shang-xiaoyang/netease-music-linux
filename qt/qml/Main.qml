@@ -52,6 +52,9 @@ ApplicationWindow {
     property string modeText: "列表循环"
     property int position: 0
     property int duration: 0
+    property real positionAnchor: 0
+    property real positionAt: 0
+    property real playRate: 1
     property var navModel: typeof navList !== "undefined" ? navList : null
     property var cardModel: typeof cardList !== "undefined" ? cardList : null
     property var songModel: typeof songList !== "undefined" ? songList : null
@@ -77,11 +80,17 @@ ApplicationWindow {
     Connections {
         target: appBridge
         function onStatusChanged(text) { status.text = text }
-        function onStateChanged(state) { window.playing = state === "playing" }
+        function onStateChanged(state) {
+            window.playing = state === "playing"
+            window.positionAnchor = window.position
+            window.positionAt = Date.now()
+        }
         function onClockChanged(payload) {
             var parts = payload.split(",")
             window.position = Number(parts[0])
             window.duration = Number(parts[1])
+            window.positionAnchor = window.position
+            window.positionAt = Date.now()
         }
         function onSongChanged(payload) {
             var parts = payload.split("\n")
@@ -91,9 +100,12 @@ ApplicationWindow {
             window.duration = Number(parts[4] || 0)
             window.currentArtists = parts[5] || ""
             if (parts[0] !== window.currentSongId) {
+                window.currentSongId = parts[0] || ""
                 window.position = 0
-                window.playing = true
+                window.positionAnchor = 0
+                window.positionAt = Date.now()
             }
+            window.playing = false
         }
         function onPageChanged(name, title) {
             window.pageName = name
@@ -103,6 +115,11 @@ ApplicationWindow {
         }
         function onAccountChanged(label) { account.text = label }
         function onModeChanged(label) { window.modeText = label }
+        function onRateChanged(rate) {
+            window.positionAnchor = window.position
+            window.positionAt = Date.now()
+            window.playRate = rate
+        }
         function onQualityChanged(label) { window.qualityText = label }
         function onVolumeChanged(value) { window.volume = value }
         function onCoverChanged(path) { window.coverPath = path }
@@ -1473,6 +1490,15 @@ ApplicationWindow {
         anchors.bottom: parent.bottom
         spacing: 0
         z: 2
+        Timer {
+            interval: 200
+            running: window.playing && window.duration > 0
+            repeat: true
+            onTriggered: {
+                var next = window.positionAnchor + (Date.now() - window.positionAt) * window.playRate
+                window.position = Math.min(window.duration, Math.max(0, next))
+            }
+        }
         PlayBar {
             id: playBar
             width: parent.width
