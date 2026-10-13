@@ -88,7 +88,7 @@ class AppBridge(QObject):
         self._loading_pos = False
         self._ui_playing = False
         self._volume = self._saved_volume()
-        self._pulse_cache = (0, None)
+        self.player.playbin.set_property("volume", self._volume)
         self._liked = set()
         self._lyrics = []
         self._lyric_words = []
@@ -1214,6 +1214,7 @@ class AppBridge(QObject):
                 self._loading_pos = False
             self.qualityChanged.emit(api.QUALITY_LABEL.get(self._quality, self._quality))
             threading.Thread(target=self._start_cached, args=(token, song), daemon=True).start()
+            threading.Thread(target=self._load_qualities, args=(token, song["songId"], None), daemon=True).start()
             return
         self.statusChanged.emit(f"正在获取{api.QUALITY_LABEL.get(self._quality, '')}…")
         threading.Thread(target=self._start, args=(token, song), daemon=True).start()
@@ -1401,37 +1402,9 @@ class AppBridge(QObject):
         except (OSError, ValueError):
             return 0.8
 
-    def _pulse_stream(self):
-        cached_at, cached = self._pulse_cache
-        if time.time() - cached_at < 3:
-            return cached
-        try:
-            out = subprocess.check_output(["pactl", "list", "sink-inputs"], stderr=subprocess.DEVNULL, timeout=2, text=True)
-        except (OSError, subprocess.SubprocessError):
-            return None
-        current = matched = None
-        for line in out.splitlines():
-            head = line.strip()
-            if head.startswith("Sink Input #"):
-                current = head.split("#", 1)[1].strip()
-            elif current and "application.process.id" in head and f'= "{os.getpid()}"' in head:
-                matched = current
-        self._pulse_cache = (time.time(), matched)
-        return matched
-
     def _apply_volume(self):
-        self._post("volume", 1.0)
-        stream = self._pulse_stream()
-        if not stream:
-            return
-        percent = f"{int(round(self._volume * 100))}%"
-        try:
-            subprocess.check_call(
-                ["pactl", "set-sink-input-volume", stream, percent],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2,
-            )
-        except (OSError, subprocess.SubprocessError):
-            self.statusChanged.emit("播放音量没有改成功")
+        # 只改这个播放器的增益，不改整机输出。播放流还没出现时也能生效。
+        self._post("volume", self._volume)
 
     def _load_qualities(self, token, song_id, known):
         try:
@@ -2084,11 +2057,13 @@ class AppBridge(QObject):
         self.likedChanged.emit(song_id in self._liked)
         self._ui_playing = False
         self.stateChanged.emit("paused")
+        self.qualityChanged.emit(api.QUALITY_LABEL.get(self._quality, self._quality))
         where = f" · {self._queue_title}" if self._queue_title else ""
         self.statusChanged.emit(f"已恢复 {self._song.get('name') or ''}{where} · 已暂停")
         if self._song.get("cover"):
             threading.Thread(target=self._cache_cover, args=(self._song["cover"], 46), daemon=True).start()
         threading.Thread(target=self._restore_lyric, args=(self._song["songId"],), daemon=True).start()
+        threading.Thread(target=self._load_qualities, args=(self._token, self._song["songId"], None), daemon=True).start()
 
     def _restore_lyric(self, song_id):
         try:

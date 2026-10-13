@@ -920,6 +920,48 @@ ApplicationWindow {
                     Layout.fillHeight: true
                     sourceComponent: songPage
                 }
+                QtObject {
+                    id: songMenuState
+                    property int row: -1
+                    function open(row) {
+                        songMenuState.row = row
+                        removeTrackItem.visible = appBridge.canRemoveCurrent()
+                        appBridge.openCollect()
+                        songMenu.popup()
+                    }
+                }
+                Menu {
+                    id: songMenu
+                    MenuItem { text: "⏭  下一首播放"; onTriggered: appBridge.playNext(songMenuState.row) }
+                    MenuItem {
+                        text: (appBridge.songLiked((songList.get(songMenuState.row) || {}).songId) ? "♥  取消喜欢" : "♡  加入喜欢")
+                        onTriggered: appBridge.toggleLike(songMenuState.row)
+                    }
+                    MenuItem { text: "↓  下载"; onTriggered: appBridge.enqueueDownload(songMenuState.row) }
+                    MenuItem { text: "✎  查看评论"; onTriggered: appBridge.openComments(songMenuState.row) }
+                    MenuItem {
+                        id: removeTrackItem
+                        text: "✕  从当前歌单移除"
+                        visible: false
+                        height: visible ? implicitHeight : 0
+                        onTriggered: appBridge.removeFromPlaylist(songMenuState.row)
+                    }
+                    Menu {
+                        id: collectMenu
+                        title: "收藏到歌单"
+                        Instantiator {
+                            model: collectList
+                            delegate: MenuItem {
+                                text: name
+                                visible: kind !== "create"
+                                height: visible ? implicitHeight : 0
+                                onTriggered: appBridge.collectTo(songMenuState.row, itemId)
+                            }
+                            onObjectAdded: collectMenu.insertItem(index, object)
+                            onObjectRemoved: collectMenu.removeItem(object)
+                        }
+                    }
+                }
                 Component {
                     id: songPage
                 ListView {
@@ -958,36 +1000,7 @@ ApplicationWindow {
                     }
                     function openRowMenu(row) {
                         menuRow = row
-                        songMenu.popup()
-                    }
-                    Menu {
-                        id: songMenu
-                        MenuItem { text: "⏭  下一首播放"; onTriggered: appBridge.playNext(songView.menuRow) }
-                        MenuItem {
-                            text: (appBridge.songLiked((songList.get(songView.menuRow) || {}).songId) ? "♥  取消喜欢" : "♡  加入喜欢")
-                            onTriggered: appBridge.toggleLike(songView.menuRow)
-                        }
-                        MenuItem { text: "↓  下载"; onTriggered: appBridge.enqueueDownload(songView.menuRow) }
-                        MenuItem { text: "✎  查看评论"; onTriggered: appBridge.openComments(songView.menuRow) }
-                        MenuItem {
-                            text: "✕  从当前歌单移除"
-                            visible: appBridge.canRemoveCurrent()
-                            height: visible ? implicitHeight : 0
-                            onTriggered: appBridge.removeFromPlaylist(songView.menuRow)
-                        }
-                        Menu {
-                            id: collectMenu
-                            title: "收藏到歌单"
-                            Instantiator {
-                                model: !appBridge || appBridge.createdPlaylists() === "" ? [] : appBridge.createdPlaylists().split("\n")
-                                delegate: MenuItem {
-                                    text: modelData.split("|")[1]
-                                    onTriggered: appBridge.collectTo(songView.menuRow, modelData.split("|")[0])
-                                }
-                                onObjectAdded: collectMenu.insertItem(index, object)
-                                onObjectRemoved: collectMenu.removeItem(object)
-                            }
-                        }
+                        songMenuState.open(row)
                     }
                     delegate: ItemDelegate {
                         width: songView.width
@@ -1145,10 +1158,19 @@ ApplicationWindow {
                         Layout.fillHeight: true
                         model: window.songModel
                         clip: true
+                        function openRowMenu(row) {
+                            songMenuState.open(row)
+                        }
                         delegate: ItemDelegate {
                             width: detailSongs.width
                             height: 48
                             onDoubleClicked: appBridge.playRow(index)
+                            onPressAndHold: detailSongs.openRowMenu(index)
+                            MouseArea {
+                                anchors.fill: parent
+                                acceptedButtons: Qt.RightButton
+                                onClicked: detailSongs.openRowMenu(index)
+                            }
                             RowLayout {
                                 anchors.fill: parent
                                 anchors.leftMargin: 16
@@ -1307,10 +1329,19 @@ ApplicationWindow {
                         Layout.fillHeight: true
                         model: window.songModel
                         clip: true
+                        function openRowMenu(row) {
+                            songMenuState.open(row)
+                        }
                         delegate: ItemDelegate {
                             width: artistSongs.width
                             height: 48
                             onDoubleClicked: appBridge.playRow(index)
+                            onPressAndHold: artistSongs.openRowMenu(index)
+                            MouseArea {
+                                anchors.fill: parent
+                                acceptedButtons: Qt.RightButton
+                                onClicked: artistSongs.openRowMenu(index)
+                            }
                             RowLayout {
                                 anchors.fill: parent
                                 anchors.leftMargin: 16

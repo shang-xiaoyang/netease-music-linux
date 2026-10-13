@@ -236,6 +236,9 @@ Rectangle {
                 onClicked: {
                     if (bar.qualityMenu === "")
                         return
+                    var spot = qualityButton.mapToItem(bar, 0, 0)
+                    qualityPopup.x = spot.x + (qualityButton.width - qualityPopup.width) / 2
+                    qualityPopup.y = spot.y - qualityPopup.height - 6
                     qualityPopup.open()
                 }
                 ToolTip.visible: containsMouse && !qualityPopup.visible
@@ -244,12 +247,11 @@ Rectangle {
             }
             Popup {
                 id: qualityPopup
-                y: -height - 6
-                x: (parent.width - width) / 2
+                parent: bar
                 width: 148
                 height: bar.qualityMenu === "" ? 0 : bar.qualityMenu.split("\n").length * 26 + 8
                 padding: 4
-                closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+                closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutsideParent | Popup.CloseOnPressOutside
                 background: Rectangle {
                     color: "#FFFFFF"
                     radius: 8
@@ -292,24 +294,43 @@ Rectangle {
             }
         }
         IconButton { label: "词"; tip: "桌面歌词"; onClicked: bar.toggleDeskLyric() }
-        IconButton { iconName: bar.volume <= 0.01 ? "audio-volume-muted-symbolic" : "audio-volume-high-symbolic"; tip: "系统音量"; onClicked: volumePopup.open() }
+        IconButton {
+            id: volumeButton
+            iconName: bar.volume <= 0.01 ? "audio-volume-muted-symbolic" : "audio-volume-high-symbolic"
+            tip: "音量"
+            onClicked: {
+                var spot = volumeButton.mapToItem(bar, 0, 0)
+                volumePopup.x = spot.x + (volumeButton.width - volumePopup.width) / 2
+                volumePopup.y = spot.y - volumePopup.height - 6
+                volumePopup.open()
+            }
+        }
         IconButton { iconName: "view-more-symbolic"; tip: "更多"; onClicked: bar.openMore() }
     }
 
     Popup {
         id: volumePopup
-        x: parent.width - width - 36
-        y: -height - 6
+        parent: bar
         width: 36
-        height: 120
-        padding: 8
+        height: 128
+        padding: 6
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutsideParent | Popup.CloseOnPressOutside
+        background: Rectangle {
+            color: "#FFFFFF"
+            radius: 8
+            border.color: "#E6E6E8"
+        }
         Slider {
+            id: volumeSlider
             anchors.fill: parent
             orientation: Qt.Vertical
             from: 0
             to: 1
+            stepSize: 0.01
+            live: true
             value: bar.volume
             onMoved: bar.volumeTo(value)
+            onPressedChanged: if (!pressed) bar.volumeTo(value)
         }
     }
 

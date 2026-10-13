@@ -112,7 +112,6 @@ class PlayerBackend(QObject):
                 self._seek_target = None
         self.playbin.set_property("uri", url)
         self._uri = url
-        self.playbin.set_property("volume", 1.0)
         self.playbin.set_state(Gst.State.PLAYING)
         # 续播还没跳到原进度时，不要把时长发成 0，否则界面会停在暂停。
         if not keep:
