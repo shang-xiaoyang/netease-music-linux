@@ -114,8 +114,13 @@ class PlayerBackend(QObject):
         self._uri = url
         self.playbin.set_property("volume", 1.0)
         self.playbin.set_state(Gst.State.PLAYING)
-        self.positionChanged.emit(keep, 0)
+        # 续播还没跳到原进度时，不要把时长发成 0，否则界面会停在暂停。
+        if not keep:
+            self.positionChanged.emit(0, 0)
         self._ensure_clock()
+        # 续播位置已经在 begin_switch 里记下了。等管道能定位再跳，不要另起一次。
+        if keep > 500:
+            threading.Thread(target=self._seek_worker, args=(keep,), daemon=True).start()
 
     @pyqtSlot()
     def pause(self):
@@ -258,18 +263,19 @@ class PlayerBackend(QObject):
             except Exception:
                 pos = dur = 0
             self._store(pos, dur)
-            # 界面进度按墙钟估算。管道查询只用来校正，不必那么勤。
-            time.sleep(1.0)
+            # 正在跳转时勤一点，出声后界面才能马上从暂停变成播放。
+            time.sleep(0.2 if self._seek_target else 1.0)
 
     def _store(self, pos, dur):
         emit = False
         with self._lock:
             if self._want != "playing":
                 pos = 0
-            landed = bool(pos) and self._seek_landed(pos)
+            landed = self._seek_landed(pos)
             if landed:
-                self._position = pos
-                self._anchor = pos
+                if pos:
+                    self._position = pos
+                    self._anchor = pos
                 self._started_at = time.time()
                 was_seeking = self._seek_target is not None
                 self._seek_target = None
@@ -296,13 +302,29 @@ class PlayerBackend(QObject):
         return abs(pos - target) < 1500
 
     def _seek_worker(self, target):
+        """管道从空切到播放时，定位请求会直接失败。等到能暂停或播放再跳。"""
         try:
-            _ok, state, _pending = self.playbin.get_state(500 * Gst.MSECOND)
-            if state == Gst.State.NULL:
-                return
-            if state not in (Gst.State.PAUSED, Gst.State.PLAYING):
+            ready = False
+            for _ in range(16):
+                with self._lock:
+                    if self._seek_target is None or self._want != "playing":
+                        return
+                _ok, state, pending = self.playbin.get_state(250 * Gst.MSECOND)
+                if state in (Gst.State.PAUSED, Gst.State.PLAYING) or pending in (Gst.State.PAUSED, Gst.State.PLAYING):
+                    ready = True
+                    break
+                if state == Gst.State.NULL:
+                    time.sleep(0.12)
+                    continue
                 self.playbin.set_state(Gst.State.PAUSED)
-                self.playbin.get_state(500 * Gst.MSECOND)
+            if not ready:
+                with self._lock:
+                    if self._seek_target == target:
+                        self._seek_target = None
+                        self._started_at = time.time()
+                if self._want == "playing":
+                    self.stateChanged.emit("playing")
+                return
             flags = Gst.SeekFlags.FLUSH | Gst.SeekFlags.ACCURATE
             ok = self.playbin.seek_simple(Gst.Format.TIME, flags, int(target) * Gst.MSECOND)
             if not ok:
@@ -311,5 +333,13 @@ class PlayerBackend(QObject):
                     Gst.SeekFlags.FLUSH | Gst.SeekFlags.KEY_UNIT,
                     int(target) * Gst.MSECOND,
                 )
+            # 跳完后恢复播放。上面为了能定位可能停在暂停。
+            if self._want == "playing":
+                self.playbin.set_state(Gst.State.PLAYING)
         except Exception:
-            return
+            with self._lock:
+                if self._seek_target == target:
+                    self._seek_target = None
+                    self._started_at = time.time()
+            if self._want == "playing":
+                self.stateChanged.emit("playing")

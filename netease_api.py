@@ -101,6 +101,25 @@ def request(path, data=None, cookie="", method=None):
     return payload
 
 
+def search_suggest(keyword, cookie="", limit=8):
+    """输入时的下拉建议。只取歌名和歌手，不补封面，避免每敲一个字都拉详情。"""
+    text = (keyword or "").strip()
+    if not text:
+        return []
+    payload = request(
+        "/api/search/suggest/web",
+        {"s": text, "limit": limit},
+        cookie=cookie,
+    )
+    result = payload.get("result") or {}
+    rows = []
+    for item in (result.get("songs") or [])[:limit]:
+        song = _song(item)
+        if song.get("id") and song.get("name"):
+            rows.append(song)
+    return rows
+
+
 def search_songs(keyword, limit=30, offset=0, cookie=""):
     payload = request(
         "/api/search/get/web",

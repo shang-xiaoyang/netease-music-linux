@@ -1,4 +1,6 @@
 #!/bin/bash
 # 安装后的启动脚本。源码树里的同名脚本用于直接从仓库运行。
 cd /usr/lib/netease-music || exit 1
+# 这套 Qt 5.15 在 Wayland 上编译界面缓存会段错误。关掉缓存即可正常启动。
+export QML_DISABLE_DISK_CACHE=1
 exec -a netease-music /usr/bin/python3 -m qt.app "$@"

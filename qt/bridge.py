@@ -54,6 +54,7 @@ class AppBridge(QObject):
     detailChanged = pyqtSignal(str)
     loginKeyChanged = pyqtSignal(str)
     qualitiesChanged = pyqtSignal(str)
+    suggestChanged = pyqtSignal(str)
     _uiReady = pyqtSignal(str)
 
     def __init__(self):
@@ -166,6 +167,8 @@ class AppBridge(QObject):
                 self.downloads.replace(payload)
             elif kind == "login":
                 self.loginKeyChanged.emit(payload)
+            elif kind == "suggest":
+                self.suggestChanged.emit(payload)
             elif kind == "qualities":
                 self.qualitiesChanged.emit(payload)
             elif kind == "lyric":
@@ -906,6 +909,55 @@ class AppBridge(QObject):
         self._post("downloads", list(self._download_rows))
 
     @pyqtSlot(str)
+    def suggest(self, keyword):
+        text = (keyword or "").strip()
+        self._suggest_token = getattr(self, "_suggest_token", 0) + 1
+        token = self._suggest_token
+        if not text:
+            self.suggestChanged.emit("")
+            return
+        threading.Thread(target=self._suggest, args=(text, token), daemon=True).start()
+
+    def _suggest(self, keyword, token):
+        try:
+            songs = api.search_suggest(keyword, cookie=self._cookie, limit=8)
+        except api.ApiError:
+            songs = []
+        if token != getattr(self, "_suggest_token", 0):
+            return
+        lines = []
+        for song in songs:
+            lines.append("\t".join((
+                str(song.get("id") or ""),
+                song.get("name") or "",
+                song.get("artist") or "",
+                str(song.get("artistId") or ""),
+            )))
+        self._post("suggest", "\n".join(lines))
+
+    @pyqtSlot(str, str, str)
+    def playSuggestion(self, song_id, name, artist):
+        song_id = str(song_id or "").strip()
+        if not song_id:
+            return
+        self.suggestChanged.emit("")
+        song = {
+            "songId": song_id,
+            "name": name or "未命名",
+            "artist": artist or "",
+            "artistId": "",
+            "artists": "",
+            "album": "",
+            "albumId": "",
+            "cover": "",
+            "local": "",
+            "duration": 0,
+            "vip": False,
+        }
+        self._suggest_play = song_id
+        self.search(name or song_id)
+
+    @pyqtSlot(str)
     def search(self, keyword):
         text = (keyword or "").strip()
         if not text:
@@ -959,6 +1011,16 @@ class AppBridge(QObject):
         rows = self._song_rows(songs)
         self._post_songs(rows, f"找到 {len(songs)} 首", len(songs), "搜索", token=token)
         self._cache_song_covers(rows)
+        wanted = getattr(self, "_suggest_play", "")
+        self._suggest_play = ""
+        if wanted and token == self._list_token:
+            index = next((i for i, row in enumerate(rows) if row.get("songId") == wanted), -1)
+            if index >= 0:
+                self._queue = [dict(item) for item in rows if item.get("songId")]
+                self._queue_source = ""
+                self._queue_title = "搜索"
+                self.queue.replace(self._queue)
+                self._play_index(index)
 
     @pyqtSlot(str, str)
     def openArtist(self, artist_id, name):
@@ -1146,12 +1208,9 @@ class AppBridge(QObject):
         cached = cache_lookup(song["songId"], self._quality)
         if cached:
             self.statusChanged.emit("正在打开本机缓存")
-            self._post("play", urllib.parse.urljoin("file:", urllib.request.pathname2url(cached)))
-            resume_at = getattr(self, "_resume_at", 0)
             self._resume_at = 0
-            if resume_at > 1500:
-                self._post("seek", resume_at)
-            else:
+            self._post("play", urllib.parse.urljoin("file:", urllib.request.pathname2url(cached)))
+            if keep <= 1500:
                 self._loading_pos = False
             self.qualityChanged.emit(api.QUALITY_LABEL.get(self._quality, self._quality))
             threading.Thread(target=self._start_cached, args=(token, song), daemon=True).start()
@@ -1193,12 +1252,10 @@ class AppBridge(QObject):
             return
         cached = cache_lookup(song["songId"], info.get("level") or self._quality)
         play_url = urllib.parse.urljoin("file:", urllib.request.pathname2url(cached)) if cached else info["url"]
-        self._post("play", play_url)
-        resume_at = getattr(self, "_resume_at", 0)
+        resume_at = int(getattr(self, "_resume_at", 0) or 0)
         self._resume_at = 0
-        if resume_at > 1500:
-            self._post("seek", resume_at)
-        else:
+        self._post("play", play_url)
+        if resume_at <= 1500:
             self._loading_pos = False
         if not cached:
             threading.Thread(
@@ -1994,17 +2051,8 @@ class AppBridge(QObject):
             return
         index = payload.get("index") if isinstance(payload.get("index"), int) else 0
         index = min(max(index, 0), len(songs) - 1)
-        page = payload.get("page") or ""
+        # 只在这次运行里记住页面。退出再打开回到首页，不恢复上次的歌单或搜索页。
         page_title = payload.get("pageTitle") or payload.get("title") or "当前播放"
-        list_id = str(payload.get("listId") or payload.get("source") or "")
-        if page in ("list", "artist", "album") and page_title:
-            self._page = page
-            self._page_title = page_title
-            self.pageChanged.emit(page, page_title)
-            if page == "list" and list_id:
-                self._list_id = list_id
-                token = self._list_token
-                threading.Thread(target=self._load_playlist, args=(list_id, page_title, token), daemon=True).start()
         self._queue = songs
         self._queue_title = payload.get("title") or page_title
         self._queue_source = str(payload.get("source") or "")
@@ -2139,7 +2187,9 @@ class AppBridge(QObject):
     def _on_position(self, pos, dur):
         if self.player.want() != "playing":
             return
-        if self.player._seek_target and abs(pos - self.player._seek_target) > 1500:
+        target = self.player._seek_target
+        # 定位没落地，或时长还是 0，都先别把界面标成已经在播。
+        if target is not None and (not dur or abs(pos - target) > 1500):
             return
         self._loading_pos = False
         total = dur or int((self._song or {}).get("duration") or 0)

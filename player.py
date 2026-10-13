@@ -4915,6 +4915,7 @@ class _LyricX11:
         x11.XDisplayHeight.argtypes = [ctypes.c_void_p, ctypes.c_int]
         x11.XDisplayHeight.restype = ctypes.c_int
         x11.XMoveWindow.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int, ctypes.c_int]
+        x11.XRaiseWindow.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
         x11.XFlush.argtypes = [ctypes.c_void_p]
         x11.XQueryPointer.restype = ctypes.c_int
         x11.XQueryPointer.argtypes = [
@@ -4982,6 +4983,7 @@ class _LyricX11:
             window.move(int(x), int(y))
             return
         self._x11.XMoveWindow(self._display, gdk_window.get_xid(), int(x), int(y))
+        self._x11.XRaiseWindow(self._display, gdk_window.get_xid())
         self._x11.XFlush(self._display)
 
     def pointer(self):
@@ -5037,7 +5039,9 @@ def _run_desk_lyric():
     window.set_skip_pager_hint(True)
     window.set_keep_above(True)
     window.set_accept_focus(True)
-    window.set_type_hint(Gdk.WindowTypeHint.UTILITY)
+    # 允许停在任务栏中间。普通工具窗口会被工作区约束抬到任务栏上方。
+    window.set_geometry_hints(None, Gdk.Geometry(), 0)
+    window.set_type_hint(Gdk.WindowTypeHint.DOCK)
     window.set_app_paintable(True)
     width, height = 560, 44
     font = "Sans Bold 15"
@@ -5185,18 +5189,25 @@ def _run_desk_lyric():
     def read_position():
         try:
             payload = json.loads(open(LYRIC_POS_PATH, encoding="utf-8").read())
-            return int(payload["x"]), int(payload["y"]), int(payload.get("scale") or 0)
+            return int(payload["x"]), int(payload["y"]), int(payload.get("scale") or 0), bool(payload.get("locked"))
         except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
             return None
 
-    def write_position(x, y):
+    def write_position(x, y, locked=None):
         _screen_w, _screen_h, scale = x11.screen(window)
         window._xy = (int(x), int(y))
+        if locked is None:
+            locked = window._locked
         try:
             os.makedirs(DATA_DIR, exist_ok=True)
             tmp = LYRIC_POS_PATH + ".tmp"
             with open(tmp, "w", encoding="utf-8") as handle:
-                json.dump({"x": int(x), "y": int(y), "scale": int(scale)}, handle)
+                json.dump({
+                    "x": int(x),
+                    "y": int(y),
+                    "scale": int(scale),
+                    "locked": bool(locked),
+                }, handle)
             os.replace(tmp, LYRIC_POS_PATH)
         except OSError:
             pass
@@ -5219,41 +5230,56 @@ def _run_desk_lyric():
         return window._frame
 
     def fit(x, y):
+        """上下可以探进任务栏。只留一行字还在屏幕里，避免拖出去就再也拉不回来。"""
         screen_w, screen_h, scale = x11.screen(window)
         left, top = frame_size()
         pixel_w = width * scale + left
         pixel_h = height * scale + top
+        keep = max(16, int(pixel_h * 0.45))
         x = min(max(0, int(x)), max(0, screen_w - pixel_w))
-        y = min(max(0, int(y)), max(0, screen_h - pixel_h))
+        y = min(max(0, int(y)), max(0, screen_h - keep))
         return x, y
 
     def place(*_args):
         if window._placed:
             return False
+        # 窗口还没映射时，XWayland 报的屏幕高度会少一块任务栏。等真正出来再摆。
+        if window.get_window() is None or not window.get_mapped():
+            return False
         screen_w, screen_h, scale = x11.screen(window)
+        if screen_h < height * scale + 8:
+            return False
         saved = read_position()
+        locked = False
         if saved is not None:
-            x, y, saved_scale = saved
-            # 没有 scale 的旧文件是 GTK 逻辑坐标，按 1 倍换算到当前物理像素。
+            x, y, saved_scale, locked = saved
+            # 坐标按物理像素保存。只有旧文件没有 scale 时，才从逻辑坐标换算。
             if saved_scale < 1:
-                saved_scale = 1
-            if saved_scale != scale:
-                x = int(round(x * scale / saved_scale))
-                y = int(round(y * scale / saved_scale))
+                x = int(round(x * scale))
+                y = int(round(y * scale))
             target = fit(x, y)
-            x11.move(window, *target)
-            write_position(*target)
         else:
             try:
                 panel = int(Gio.Settings.new("org.ukui.panel.settings").get_int("panelsize") or 46)
             except (GLib.Error, TypeError, ValueError):
                 panel = 46
             target = fit((screen_w - width * scale) // 2, screen_h - panel * scale - height * scale - 8 * scale)
-            x11.move(window, *target)
-            write_position(*target)
+        window._xy = target
         window.resize(width, height)
         window.set_size_request(width, height)
         window._placed = True
+        # 合成器映射时会把窗口抬到任务栏工作区上面。多移几次，盖过这次抬升。
+        tries = [3]
+
+        def settle():
+            x11.move(window, *target)
+            tries[0] -= 1
+            if tries[0] > 0:
+                return True
+            if locked:
+                set_locked(True)
+            return False
+        GLib.timeout_add(80, settle)
         return False
 
     def show_chrome(shown):
@@ -5316,6 +5342,8 @@ def _run_desk_lyric():
     def set_locked(locked):
         window._locked = bool(locked)
         window._drag = None
+        if getattr(window, "_xy", None):
+            write_position(*window._xy, window._locked)
         if window._locked:
             show_chrome(False)
             show_unlock(False)
@@ -5543,11 +5571,17 @@ def _run_desk_lyric():
     lock.connect("clicked", lambda *_: set_locked(not window._locked))
     close.connect("clicked", lambda *_: (window.hide(), Gtk.main_quit()))
     window.connect("map-event", place)
+    window.connect("configure-event", place)
     window.connect("enter-notify-event", lambda *_: show_chrome(True))
     window.connect("leave-notify-event", leave)
     window.connect("button-press-event", press)
     window.connect("button-release-event", release)
     window.connect("motion-notify-event", motion)
+    # 不受工作区约束，才能停在任务栏中间，重新打开也不会被抬上去。
+    window.realize()
+    gdk_window = window.get_window()
+    if gdk_window is not None:
+        gdk_window.set_override_redirect(True)
     window.show_all()
     actions.hide()
     plate.hide()

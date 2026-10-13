@@ -35,6 +35,7 @@ ApplicationWindow {
     property bool blurSearch: false
     onBlurSearchChanged: if (blurSearch) { blurSearch = false; leaveSearch() }
     property bool searchWanted: false
+    property string suggestText: ""
     property bool escapeWanted: false
     onSearchWantedChanged: if (searchWanted) { search.forceActiveFocus(); searchWanted = false }
     onEscapeWantedChanged: if (escapeWanted) { escapeWanted = false; handleEscape() }
@@ -80,6 +81,7 @@ ApplicationWindow {
     Connections {
         target: appBridge
         function onStatusChanged(text) { status.text = text }
+        function onSuggestChanged(text) { window.suggestText = text || "" }
         function onStateChanged(state) {
             window.playing = state === "playing"
             window.positionAnchor = window.position
@@ -211,12 +213,114 @@ ApplicationWindow {
                         background: Item {}
                         leftPadding: 0
                         rightPadding: 0
+                        property int suggestToken: 0
+                        onTextChanged: {
+                            suggestToken = suggestToken + 1
+                            var token = suggestToken
+                            var typed = text
+                            if (typed.trim() === "") {
+                                window.suggestText = ""
+                                return
+                            }
+                            suggestTimer.token = token
+                            suggestTimer.typed = typed
+                            suggestTimer.restart()
+                        }
                         onAccepted: {
+                            suggestTimer.stop()
+                            window.suggestText = ""
                             appBridge.search(text)
                             leaveSearch()
                         }
-                        onActiveFocusChanged: if (!activeFocus) text = ""
+                        function openSuggestion(fields) {
+                            suggestTimer.stop()
+                            window.suggestText = ""
+                            appBridge.playSuggestion(fields[0] || "", fields[1] || text, fields[2] || "")
+                            leaveSearch()
+                        }
                         Keys.onEscapePressed: handleEscape()
+                        Keys.onDownPressed: if (suggestPopup.visible && suggestView.count > 0) suggestView.currentIndex = 0
+                        Timer {
+                            id: suggestTimer
+                            interval: 280
+                            property int token: 0
+                            property string typed: ""
+                            onTriggered: {
+                                if (token !== search.suggestToken)
+                                    return
+                                appBridge.suggest(typed)
+                            }
+                        }
+                    }
+                }
+                Popup {
+                    id: suggestPopup
+                    parent: window.contentItem
+                    x: searchBox.x
+                    y: titleBar.height - 2
+                    width: searchBox.width
+                    height: Math.min(8, suggestView.count) * 36 + 36
+                    visible: search.activeFocus && window.suggestText !== ""
+                    modal: false
+                    closePolicy: Popup.NoAutoClose
+                    padding: 0
+                    z: 20
+                    background: Rectangle { color: "#FFFFFF"; radius: 8; border.color: "#E6E6E8" }
+                    ListView {
+                        id: suggestView
+                        anchors.fill: parent
+                        anchors.margins: 4
+                        clip: true
+                        model: window.suggestText === "" ? [] : window.suggestText.split("\n")
+                        keyNavigationWraps: false
+                        header: Item {
+                            width: suggestView.width
+                            height: 32
+                            Label {
+                                anchors.verticalCenter: parent.verticalCenter
+                                anchors.left: parent.left
+                                anchors.leftMargin: 12
+                                text: "搜索「" + search.text + "」"
+                                color: "#507DAF"
+                                font.pixelSize: 13
+                                elide: Text.ElideRight
+                                width: parent.width - 24
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: search.accepted()
+                            }
+                        }
+                        delegate: Item {
+                            width: suggestView.width
+                            height: 36
+                            property var fields: String(modelData).split("\t")
+                            Rectangle {
+                                anchors.fill: parent
+                                radius: 6
+                                color: suggestHover.containsMouse || (suggestView.activeFocus && index === suggestView.currentIndex) ? "#F4F4F6" : "transparent"
+                            }
+                            Label {
+                                anchors.verticalCenter: parent.verticalCenter
+                                anchors.left: parent.left
+                                anchors.leftMargin: 12
+                                width: parent.width - 24
+                                text: (fields[1] || "") + (fields[2] ? "  ·  " + fields[2] : "")
+                                color: "#333333"
+                                font.pixelSize: 13
+                                elide: Text.ElideRight
+                            }
+                            MouseArea {
+                                id: suggestHover
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: search.openSuggestion(fields)
+                            }
+                            Keys.onReturnPressed: search.openSuggestion(fields)
+                            Keys.onEnterPressed: search.openSuggestion(fields)
+                        }
                     }
                 }
             }
@@ -321,7 +425,7 @@ ApplicationWindow {
                     height: kind === "section" ? 28 : 34
                     Rectangle {
                         anchors.fill: parent
-                        color: kind === "section" ? "transparent" : (mouse.hovered ? "#E8F3FF" : (window.pageTitle === label ? "#FDECEC" : "transparent"))
+                        color: kind === "section" ? "transparent" : (mouse.containsMouse && !nav.moving ? "#E8F3FF" : (window.pageTitle === label ? "#FDECEC" : "transparent"))
                     }
                     Row {
                         anchors.fill: parent
@@ -824,7 +928,7 @@ ApplicationWindow {
                     Layout.fillWidth: true
                     Layout.fillHeight: true
                     model: window.songModel
-                    cacheBuffer: 240
+                    cacheBuffer: 1200
                     clip: true
                     boundsBehavior: Flickable.StopAtBounds
                     onAtYEndChanged: if (atYEnd && count > 0) appBridge.moreSongs()
@@ -832,47 +936,71 @@ ApplicationWindow {
                         target: window
                         function onListResetChanged() { songView.positionViewAtBeginning() }
                     }
+                    property int menuRow: -1
+                    property var artistPeople: []
+                    function openArtists(people) {
+                        artistPeople = people
+                        artistMenu.popup()
+                    }
+                    Menu {
+                        id: artistMenu
+                        Instantiator {
+                            model: songView.artistPeople
+                            delegate: MenuItem {
+                                property string personId: modelData.split(",")[0]
+                                property string personName: modelData.split(",").slice(1).join(",")
+                                text: personName
+                                onTriggered: appBridge.openArtist(personId, personName)
+                            }
+                            onObjectAdded: artistMenu.insertItem(index, object)
+                            onObjectRemoved: artistMenu.removeItem(object)
+                        }
+                    }
+                    function openRowMenu(row) {
+                        menuRow = row
+                        songMenu.popup()
+                    }
+                    Menu {
+                        id: songMenu
+                        MenuItem { text: "⏭  下一首播放"; onTriggered: appBridge.playNext(songView.menuRow) }
+                        MenuItem {
+                            text: (appBridge.songLiked((songList.get(songView.menuRow) || {}).songId) ? "♥  取消喜欢" : "♡  加入喜欢")
+                            onTriggered: appBridge.toggleLike(songView.menuRow)
+                        }
+                        MenuItem { text: "↓  下载"; onTriggered: appBridge.enqueueDownload(songView.menuRow) }
+                        MenuItem { text: "✎  查看评论"; onTriggered: appBridge.openComments(songView.menuRow) }
+                        MenuItem {
+                            text: "✕  从当前歌单移除"
+                            visible: appBridge.canRemoveCurrent()
+                            height: visible ? implicitHeight : 0
+                            onTriggered: appBridge.removeFromPlaylist(songView.menuRow)
+                        }
+                        Menu {
+                            id: collectMenu
+                            title: "收藏到歌单"
+                            Instantiator {
+                                model: !appBridge || appBridge.createdPlaylists() === "" ? [] : appBridge.createdPlaylists().split("\n")
+                                delegate: MenuItem {
+                                    text: modelData.split("|")[1]
+                                    onTriggered: appBridge.collectTo(songView.menuRow, modelData.split("|")[0])
+                                }
+                                onObjectAdded: collectMenu.insertItem(index, object)
+                                onObjectRemoved: collectMenu.removeItem(object)
+                            }
+                        }
+                    }
                     delegate: ItemDelegate {
                         width: songView.width
                         height: 56
                         onDoubleClicked: appBridge.playRow(index)
-                        onPressAndHold: songMenu.popup()
+                        onPressAndHold: songView.openRowMenu(index)
                         background: Rectangle {
-                            color: model.songId === window.currentSongId ? "#FDECEC" : (parent.hovered ? "#E8F3FF" : "transparent")
+                            color: model.songId === window.currentSongId ? "#FDECEC" : (parent.hovered && !songView.moving ? "#E8F3FF" : "transparent")
                         }
                         MouseArea {
                             anchors.fill: parent
                             acceptedButtons: Qt.RightButton
-                            onClicked: songMenu.popup()
-                        }
-                        Menu {
-                            id: songMenu
-                            MenuItem { text: "⏭  下一首播放"; onTriggered: appBridge.playNext(index) }
-                            MenuItem {
-                                text: (appBridge.songLiked(model.songId) ? "♥  取消喜欢" : "♡  加入喜欢")
-                                onTriggered: appBridge.toggleLike(index)
-                            }
-                            MenuItem { text: "↓  下载"; onTriggered: appBridge.enqueueDownload(index) }
-                            MenuItem { text: "✎  查看评论"; onTriggered: appBridge.openComments(index) }
-                            MenuItem {
-                                text: "✕  从当前歌单移除"
-                                visible: appBridge.canRemoveCurrent()
-                                height: visible ? implicitHeight : 0
-                                onTriggered: appBridge.removeFromPlaylist(index)
-                            }
-                            Menu {
-                                id: collectMenu
-                                title: "收藏到歌单"
-                                Instantiator {
-                                    model: !appBridge || appBridge.createdPlaylists() === "" ? [] : appBridge.createdPlaylists().split("\n")
-                                    delegate: MenuItem {
-                                        text: modelData.split("|")[1]
-                                        onTriggered: appBridge.collectTo(index, modelData.split("|")[0])
-                                    }
-                                    onObjectAdded: collectMenu.insertItem(index, object)
-                                    onObjectRemoved: collectMenu.removeItem(object)
-                                }
-                            }
+                            onClicked: songView.openRowMenu(index)
                         }
                         RowLayout {
                             anchors.fill: parent
@@ -916,23 +1044,7 @@ ApplicationWindow {
                                             appBridge.openArtist(model.artistId, model.artist)
                                             return
                                         }
-                                        artistMenu.people = people
-                                        artistMenu.popup()
-                                    }
-                                    Menu {
-                                        id: artistMenu
-                                        property var people: []
-                                        Instantiator {
-                                            model: artistMenu.people
-                                            delegate: MenuItem {
-                                                property string personId: modelData.split(",")[0]
-                                                property string personName: modelData.split(",").slice(1).join(",")
-                                                text: personName
-                                                onTriggered: appBridge.openArtist(personId, personName)
-                                            }
-                                            onObjectAdded: artistMenu.insertItem(index, object)
-                                            onObjectRemoved: artistMenu.removeItem(object)
-                                        }
+                                        songView.openArtists(people)
                                     }
                                     ToolTip.visible: containsMouse
                                     ToolTip.text: "打开歌手：" + (model.artist || "")
@@ -1523,7 +1635,14 @@ ApplicationWindow {
             onOpenLyric: appBridge.openLyric()
             onToggleDeskLyric: appBridge.toggleDeskLyric()
             onPickQuality: appBridge.setQuality(level)
-            onShowQueue: queuePopup.visible ? queuePopup.close() : queuePopup.open()
+            onShowQueue: {
+                if (queuePopup.visible)
+                    queuePopup.close()
+                else {
+                    queuePopup.open()
+                    Qt.callLater(queueView.centerCurrent)
+                }
+            }
             onToggleLike: appBridge.toggleLike(-1)
             onOpenComments: appBridge.openComments(-1)
             onCollect: {
@@ -1566,12 +1685,19 @@ ApplicationWindow {
     }
 
     function leaveSearch() {
+        suggestTimer.stop()
+        window.suggestText = ""
         search.deselect()
         search.focus = false
         keySink.forceActiveFocus()
     }
 
     function handleEscape() {
+        if (suggestPopup.visible) {
+            window.suggestText = ""
+            search.forceActiveFocus()
+            return
+        }
         if (search.activeFocus || search.text !== "") {
             search.text = ""
             leaveSearch()
@@ -1638,16 +1764,66 @@ ApplicationWindow {
         y: playColumn.y - height - 8
         padding: 0
         closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+        onOpened: Qt.callLater(queueView.centerCurrent)
         background: Rectangle {
             color: "#FFFFFF"
             radius: 8
             border.color: "#E6E6E8"
         }
         ListView {
+            id: queueView
             anchors.fill: parent
             anchors.margins: 4
             clip: true
             model: queueList
+            boundsBehavior: Flickable.StopAtBounds
+            property int menuRow: -1
+            function openRowMenu(row) {
+                menuRow = row
+                queueMenu.popup()
+            }
+            Menu {
+                id: queueMenu
+                MenuItem { text: "⏭  下一首播放"; onTriggered: appBridge.playNextQueue(queueView.menuRow) }
+                MenuItem {
+                    text: (appBridge.songLiked((queueList.get(queueView.menuRow) || {}).songId) ? "♥  取消喜欢" : "♡  加入喜欢")
+                    onTriggered: appBridge.toggleQueueLike(queueView.menuRow)
+                }
+                Menu {
+                    id: queueCollect
+                    title: "收藏到歌单"
+                    Instantiator {
+                        model: collectList
+                        delegate: MenuItem {
+                            text: name
+                            visible: kind !== "create"
+                            height: visible ? implicitHeight : 0
+                            onTriggered: appBridge.collectQueue(queueView.menuRow, itemId)
+                        }
+                        onObjectAdded: queueCollect.insertItem(index, object)
+                        onObjectRemoved: queueCollect.removeItem(object)
+                    }
+                }
+                MenuItem { text: "✕  从播放列表移除"; onTriggered: appBridge.removeFromQueue(queueView.menuRow) }
+            }
+            property int playingRow: {
+                var playing = window.currentSongId
+                var rows = count
+                if (!playing || rows < 1)
+                    return -1
+                for (var i = 0; i < rows; i++) {
+                    if (String((queueList.get(i) || {}).songId || "") === playing)
+                        return i
+                }
+                return -1
+            }
+            onPlayingRowChanged: Qt.callLater(centerCurrent)
+            function centerCurrent() {
+                var row = playingRow
+                if (!queuePopup.visible || row < 0 || count < 1)
+                    return
+                positionViewAtIndex(row, ListView.Center)
+            }
             header: Label {
                 text: "当前播放 · " + window.modeText
                 leftPadding: 12
@@ -1663,7 +1839,7 @@ ApplicationWindow {
                 height: 32
                 Rectangle {
                     anchors.fill: parent
-                    color: model.songId === window.currentSongId ? "#FDECEC" : (hover.containsMouse ? "#F6F6F8" : "transparent")
+                    color: model.songId === window.currentSongId ? "#FDECEC" : (hover.containsMouse && !queueView.moving ? "#F6F6F8" : "transparent")
                 }
                 Row {
                     anchors.fill: parent
@@ -1705,36 +1881,12 @@ ApplicationWindow {
                             return
                         }
                         appBridge.openCollect()
-                        queueMenu.popup()
+                        queueView.openRowMenu(index)
                     }
                     onPressAndHold: {
                         appBridge.openCollect()
-                        queueMenu.popup()
+                        queueView.openRowMenu(index)
                     }
-                }
-                Menu {
-                    id: queueMenu
-                    MenuItem { text: "⏭  下一首播放"; onTriggered: appBridge.playNextQueue(index) }
-                    MenuItem {
-                        text: (appBridge.songLiked(model.songId) ? "♥  取消喜欢" : "♡  加入喜欢")
-                        onTriggered: appBridge.toggleQueueLike(index)
-                    }
-                    Menu {
-                        id: queueCollect
-                        title: "收藏到歌单"
-                        Instantiator {
-                            model: collectList
-                            delegate: MenuItem {
-                                text: name
-                                visible: kind !== "create"
-                                height: visible ? implicitHeight : 0
-                                onTriggered: appBridge.collectQueue(index, itemId)
-                            }
-                            onObjectAdded: queueCollect.insertItem(index, object)
-                            onObjectRemoved: queueCollect.removeItem(object)
-                        }
-                    }
-                    MenuItem { text: "✕  从播放列表移除"; onTriggered: appBridge.removeFromQueue(index) }
                 }
             }
         }
