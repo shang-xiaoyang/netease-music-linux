@@ -117,7 +117,7 @@ def search_suggest(keyword, cookie="", limit=8):
         song = _song(item)
         if song.get("id") and song.get("name"):
             rows.append(song)
-    return _mark_playable(rows, cookie)
+    return rows
 
 
 def search_songs(keyword, limit=30, offset=0, cookie=""):
@@ -181,14 +181,68 @@ def playlist_tracks(playlist_id, cookie="", by_added=False):
 
 
 def _playlist_result(playlist, playlist_id, songs, total):
+    creator = playlist.get("creator") or {}
     return {
         "id": playlist.get("id") or playlist_id,
         "name": playlist.get("name") or "",
         "cover": _pic(playlist),
         "special": playlist.get("specialType") or 0,
+        "creator": creator.get("userId") or 0,
+        "creatorName": creator.get("nickname") or "",
+        "subscribed": bool(playlist.get("subscribed")),
+        "description": playlist.get("description") or "",
         "total": total,
         "songs": songs,
     }
+
+
+def search_playlists(keyword, limit=12, offset=0, cookie=""):
+    """搜索歌单。type=1000 是网页搜索里的歌单分类。"""
+    payload = request(
+        "/api/search/get/web",
+        {"s": keyword, "type": 1000, "limit": limit, "offset": offset},
+        cookie=cookie,
+    )
+    result = payload.get("result") or {}
+    rows = []
+    for item in result.get("playlists") or []:
+        creator = item.get("creator") or {}
+        rows.append({
+            "id": item.get("id"),
+            "name": item.get("name") or "歌单",
+            "cover": item.get("coverImgUrl") or "",
+            "count": item.get("trackCount") or 0,
+            "creator": creator.get("userId") or 0,
+            "creatorName": creator.get("nickname") or "",
+            "playCount": item.get("playCount") or 0,
+        })
+    return rows
+
+
+def subscribe_playlist(playlist_id, subscribe, cookie):
+    """收藏或取消收藏别人的歌单。t=1 收藏，t=2 取消。"""
+    request(
+        "/api/playlist/subscribe",
+        {"id": int(playlist_id), "t": 1 if subscribe else 2},
+        cookie=cookie,
+    )
+
+
+def rename_playlist(playlist_id, name, cookie):
+    """改自己创建的歌单名称。"""
+    name = (name or "").strip()
+    if not name:
+        raise ApiError("歌单名称不能为空")
+    request(
+        "/api/playlist/update/name",
+        {"id": int(playlist_id), "name": name[:40]},
+        cookie=cookie,
+    )
+
+
+def delete_playlist(playlist_id, cookie):
+    """删除自己创建的歌单。不能用来取消收藏。"""
+    request("/api/playlist/delete", {"pid": int(playlist_id)}, cookie=cookie)
 
 
 def _songs_by_ids(refs, cookie):

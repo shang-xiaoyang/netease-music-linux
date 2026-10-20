@@ -35,6 +35,15 @@ Rectangle {
     signal openMore()
     signal openArtist()
     signal pickArtist(string artistId, string name)
+    // 点播放栏空白处时，主窗口把挂在栏外的小窗也收起来。
+    signal dismissPopups()
+
+    function closeFloats() {
+        volumePopup.close()
+        qualityPopup.close()
+        playArtistMenu.close()
+        dismissPopups()
+    }
 
     function modeKind() {
         if (bar.mode.indexOf("随机") >= 0)
@@ -271,8 +280,15 @@ Rectangle {
                 hoverEnabled: true
                 cursorShape: Qt.PointingHandCursor
                 onClicked: {
+                    if (qualityPopup.visible) {
+                        qualityPopup.close()
+                        return
+                    }
                     if (bar.qualityMenu === "")
                         return
+                    volumePopup.close()
+                    playArtistMenu.close()
+                    bar.dismissPopups()
                     var spot = qualityButton.mapToItem(bar, 0, 0)
                     qualityPopup.x = spot.x + (qualityButton.width - qualityPopup.width) / 2
                     qualityPopup.y = spot.y - qualityPopup.height - 6
@@ -288,7 +304,7 @@ Rectangle {
                 width: 148
                 height: bar.qualityMenu === "" ? 0 : bar.qualityMenu.split("\n").length * 26 + 8
                 padding: 4
-                closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutsideParent | Popup.CloseOnPressOutside
+                closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
                 background: Rectangle {
                     color: "#FFFFFF"
                     radius: 8
@@ -336,6 +352,13 @@ Rectangle {
             iconName: bar.volume <= 0.01 ? "audio-volume-muted-symbolic" : "audio-volume-high-symbolic"
             tip: "音量"
             onClicked: {
+                if (volumePopup.visible) {
+                    volumePopup.close()
+                    return
+                }
+                qualityPopup.close()
+                playArtistMenu.close()
+                bar.dismissPopups()
                 var spot = volumeButton.mapToItem(bar, 0, 0)
                 volumePopup.x = spot.x + (volumeButton.width - volumePopup.width) / 2
                 volumePopup.y = spot.y - volumePopup.height - 6
@@ -345,13 +368,21 @@ Rectangle {
         IconButton { iconName: "view-more-symbolic"; tip: "更多"; onClicked: bar.openMore() }
     }
 
+    // 按钮和进度条在上层，点不到的空白才落到这里。弹层的父项是播放栏时，
+    // Qt 不会把栏内点击当成“外部点击”。
+    MouseArea {
+        anchors.fill: parent
+        z: -1
+        onPressed: bar.closeFloats()
+    }
+
     Popup {
         id: volumePopup
         parent: bar
         width: 36
         height: 128
         padding: 6
-        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutsideParent | Popup.CloseOnPressOutside
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
         background: Rectangle {
             color: "#FFFFFF"
             radius: 8

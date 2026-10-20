@@ -70,6 +70,9 @@ ApplicationWindow {
     property string lyricText: "歌词加载中…"
     property string currentSongId: ""
     property string currentArtists: ""
+    property bool playlistOwned: false
+    property bool playlistCollected: false
+    property int playlistSpecial: 0
 
     function clock(ms) {
         var value = Math.max(0, Math.floor(Number(ms || 0) / 1000))
@@ -109,10 +112,10 @@ ApplicationWindow {
             }
             window.playing = false
         }
-        function onPageChanged(name, title) {
+            function onPageChanged(name, title) {
             window.pageName = name
             window.pageTitle = title
-            if (name === "list")
+            if (name === "list" || name === "playlist")
                 window.listReset = window.listReset + 1
         }
         function onAccountChanged(label) { account.text = label }
@@ -141,6 +144,12 @@ ApplicationWindow {
         function onQualitiesChanged(text) { qualityMenu.model = text }
         function onLikedChanged(value) { window.liked = value }
         function onCurrentSongChanged(songId) { window.currentSongId = songId }
+        function onPlaylistMetaChanged(payload) {
+            var parts = (payload || "").split("|")
+            window.playlistOwned = parts[0] === "1"
+            window.playlistCollected = parts[1] === "1"
+            window.playlistSpecial = Number(parts[2] || 0)
+        }
     }
 
     Rectangle {
@@ -181,17 +190,16 @@ ApplicationWindow {
                 color: "#333333"
                 font.pixelSize: 14
             }
-            Item { Layout.fillWidth: true }
+            Item { Layout.fillWidth: true; Layout.minimumWidth: 12 }
             Rectangle {
                 id: searchBox
-                parent: titleBar
-                width: Math.min(360, Math.max(160, titleBar.width - 520))
-                height: 32
-                x: (titleBar.width - width) / 2
-                y: (titleBar.height - height) / 2
+                Layout.fillWidth: true
+                Layout.minimumWidth: 120
+                Layout.maximumWidth: 320
+                Layout.preferredHeight: 32
+                Layout.alignment: Qt.AlignVCenter
                 radius: 16
                 color: "#F5F5F7"
-                z: 2
                 Row {
                     anchors.fill: parent
                     anchors.leftMargin: 12
@@ -208,7 +216,7 @@ ApplicationWindow {
                         id: search
                         width: parent.width - 28
                         height: 32
-                        placeholderText: "搜索歌曲、歌手"
+                        placeholderText: "搜索歌曲、歌手、歌单"
                         selectByMouse: true
                         background: Item {}
                         leftPadding: 0
@@ -256,13 +264,13 @@ ApplicationWindow {
                 Popup {
                     id: suggestPopup
                     parent: window.contentItem
-                    x: searchBox.x
-                    y: titleBar.height - 2
+                    x: searchBox.mapToItem(window.contentItem, 0, 0).x
+                    y: searchBox.mapToItem(window.contentItem, 0, searchBox.height).y
                     width: searchBox.width
                     height: Math.min(8, suggestView.count) * 36 + 36
                     visible: search.activeFocus && window.suggestText !== ""
                     modal: false
-                    closePolicy: Popup.NoAutoClose
+                    closePolicy: Popup.CloseOnPressOutside | Popup.CloseOnEscape
                     padding: 0
                     z: 20
                     background: Rectangle { color: "#FFFFFF"; radius: 8; border.color: "#E6E6E8" }
@@ -324,12 +332,22 @@ ApplicationWindow {
                     }
                 }
             }
-            Item { Layout.fillWidth: true }
+            Item { Layout.fillWidth: true; Layout.minimumWidth: 12 }
             Button {
                 id: account
                 text: "登录"
                 flat: true
-                z: 3
+                clip: true
+                Layout.maximumWidth: 140
+                Layout.preferredWidth: Math.min(140, implicitWidth)
+                contentItem: Label {
+                    text: account.text
+                    color: "#333333"
+                    font.pixelSize: 13
+                    elide: Text.ElideRight
+                    horizontalAlignment: Text.AlignHCenter
+                    verticalAlignment: Text.AlignVCenter
+                }
                 onClicked: accountPopup.open()
             }
             Item {
@@ -479,9 +497,80 @@ ApplicationWindow {
                         anchors.fill: parent
                         enabled: kind !== "section"
                         hoverEnabled: true
-                        onClicked: appBridge.openNav(key)
+                        acceptedButtons: Qt.LeftButton | Qt.RightButton
+                        onClicked: {
+                            if (mouse.button === Qt.RightButton && (kind === "playlist" || kind === "liked")) {
+                                navMenuState.open(key, label, kind, owned)
+                                return
+                            }
+                            appBridge.openNav(key)
+                        }
                     }
                 }
+            }
+            QtObject {
+                id: navMenuState
+                property string key: ""
+                property string label: ""
+                property string kind: ""
+                property bool owned: false
+                function open(key, label, kind, owned) {
+                    navMenuState.key = key
+                    navMenuState.label = label
+                    navMenuState.kind = kind
+                    navMenuState.owned = owned
+                    navMenu.popup()
+                }
+            }
+            Menu {
+                id: navMenu
+                MenuItem {
+                    text: "▶  播放"
+                    onTriggered: appBridge.openNav(navMenuState.key)
+                }
+                MenuItem {
+                    text: "⏭  下一首播放"
+                    onTriggered: appBridge.playNavNext(navMenuState.key)
+                }
+                MenuItem {
+                    text: "✎  重命名"
+                    visible: navMenuState.owned
+                    height: visible ? implicitHeight : 0
+                    onTriggered: {
+                        renameField.text = navMenuState.label
+                        renameDialog.open()
+                    }
+                }
+                MenuItem {
+                    text: "✕  删除歌单"
+                    visible: navMenuState.owned
+                    height: visible ? implicitHeight : 0
+                    onTriggered: appBridge.deleteNavPlaylist(navMenuState.key)
+                }
+                MenuItem {
+                    text: "✕  取消收藏"
+                    visible: navMenuState.kind === "playlist" && !navMenuState.owned
+                    height: visible ? implicitHeight : 0
+                    onTriggered: appBridge.unsubscribeNav(navMenuState.key)
+                }
+            }
+            Dialog {
+                id: renameDialog
+                parent: window.contentItem
+                title: "重命名歌单"
+                modal: true
+                standardButtons: Dialog.Ok | Dialog.Cancel
+                x: (window.width - width) / 2
+                y: 120
+                width: 280
+                TextField {
+                    id: renameField
+                    width: renameDialog.availableWidth
+                    placeholderText: "歌单名称"
+                    selectByMouse: true
+                    maximumLength: 40
+                }
+                onAccepted: appBridge.renameNavPlaylist(navMenuState.key, renameField.text)
             }
         }
 
@@ -769,7 +858,7 @@ ApplicationWindow {
                 anchors.right: parent.right
                 anchors.top: pageHead.bottom
                 anchors.bottom: parent.bottom
-                currentIndex: window.pageName === "discover" ? 1 : window.pageName === "list" ? 2 : window.pageName === "album" ? 3 : window.pageName === "artist" ? 4 : window.pageName === "lyric" ? 5 : window.pageName === "comments" ? 6 : window.pageName === "user" ? 7 : window.pageName === "downloads" ? 8 : 0
+                currentIndex: window.pageName === "discover" ? 1 : window.pageName === "list" ? 2 : window.pageName === "playlist" ? 3 : window.pageName === "album" ? 4 : window.pageName === "artist" ? 5 : window.pageName === "lyric" ? 6 : window.pageName === "comments" ? 7 : window.pageName === "user" ? 8 : window.pageName === "downloads" ? 9 : 0
 
                 Flickable {
                     Layout.fillWidth: true
@@ -871,9 +960,34 @@ ApplicationWindow {
                     Layout.fillWidth: true
                     Layout.fillHeight: true
                     contentWidth: width
-                    contentHeight: discoverFlow.implicitHeight + 24
+                    contentHeight: discoverColumn.implicitHeight + 24
                     clip: true
                     visible: window.pageName === "discover"
+                    Column {
+                        id: discoverColumn
+                        width: parent.width
+                        Row {
+                            visible: window.pageTitle.indexOf("歌单「") === 0
+                            leftPadding: 22
+                            topPadding: 8
+                            spacing: 18
+                            Label {
+                                text: "单曲"
+                                color: "#8E8E93"
+                                font.pixelSize: 14
+                                MouseArea {
+                                    anchors.fill: parent
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: appBridge.searchTab("songs")
+                                }
+                            }
+                            Label {
+                                text: "歌单"
+                                color: "#EC4141"
+                                font.pixelSize: 14
+                                font.bold: true
+                            }
+                        }
                     Flow {
                         id: discoverFlow
                         width: Math.min(parent.width - 44, 6 * 132 - 12)
@@ -903,7 +1017,7 @@ ApplicationWindow {
                                         }
                                     }
                                     Label { text: name; width: 120; elide: Text.ElideRight; color: "#222222"; font.pixelSize: 12 }
-                                    Label { text: count + " 首"; color: "#8E8E93"; font.pixelSize: 11 }
+                                    Label { text: (creator ? creator + " · " : "") + count + " 首"; width: 120; elide: Text.ElideRight; color: "#8E8E93"; font.pixelSize: 11 }
                                 }
                                 MouseArea {
                                     anchors.fill: parent
@@ -912,6 +1026,7 @@ ApplicationWindow {
                             }
                         }
                     }
+                    }
                 }
 
                 Loader {
@@ -919,6 +1034,12 @@ ApplicationWindow {
                     Layout.fillWidth: true
                     Layout.fillHeight: true
                     sourceComponent: songPage
+                }
+                Loader {
+                    active: window.pageName === "playlist"
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    sourceComponent: playlistPage
                 }
                 QtObject {
                     id: songMenuState
@@ -972,6 +1093,33 @@ ApplicationWindow {
                 }
                 Component {
                     id: songPage
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    spacing: 0
+                    Row {
+                        Layout.leftMargin: 16
+                        Layout.topMargin: 4
+                        Layout.preferredHeight: window.pageTitle.indexOf("搜索") === 0 ? 28 : 0
+                        visible: window.pageTitle.indexOf("搜索") === 0
+                        spacing: 18
+                        Label {
+                            text: "单曲"
+                            color: "#EC4141"
+                            font.pixelSize: 14
+                            font.bold: true
+                        }
+                        Label {
+                            text: "歌单"
+                            color: "#8E8E93"
+                            font.pixelSize: 14
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: appBridge.searchTab("playlists")
+                            }
+                        }
+                    }
                 ListView {
                     id: songView
                     objectName: "songView"
@@ -1097,7 +1245,195 @@ ApplicationWindow {
                     }
                 }
                 }
+                }
 
+                Component {
+                    id: playlistPage
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        spacing: 8
+                        Row {
+                            Layout.leftMargin: 16
+                            Layout.rightMargin: 16
+                            Layout.topMargin: 8
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: 168
+                            spacing: 16
+                            Rectangle {
+                                width: 132
+                                height: 132
+                                radius: 8
+                                color: "#F3D6D6"
+                                clip: true
+                                Image {
+                                    anchors.fill: parent
+                                    source: window.detailCover ? Qt.resolvedUrl("file://" + window.detailCover) : ""
+                                    sourceSize: Qt.size(132, 132)
+                                    fillMode: Image.PreserveAspectCrop
+                                    asynchronous: true
+                                }
+                            }
+                            Column {
+                                width: parent.width - 148
+                                spacing: 6
+                                anchors.verticalCenter: parent.verticalCenter
+                                Label {
+                                    text: window.detailName || window.pageTitle
+                                    color: "#222222"
+                                    font.pixelSize: 20
+                                    font.bold: true
+                                    width: parent.width
+                                    elide: Text.ElideRight
+                                }
+                                Label {
+                                    text: window.detailSub
+                                    color: "#8E8E93"
+                                    font.pixelSize: 13
+                                    visible: text !== ""
+                                    width: parent.width
+                                    elide: Text.ElideRight
+                                }
+                                Label {
+                                    text: window.detailBrief
+                                    color: "#666666"
+                                    font.pixelSize: 12
+                                    wrapMode: Text.Wrap
+                                    width: parent.width
+                                    maximumLineCount: 2
+                                    elide: Text.ElideRight
+                                    visible: text !== ""
+                                }
+                                Row {
+                                    spacing: 10
+                                    topPadding: 6
+                                    Rectangle {
+                                        width: playAllLabel.implicitWidth + 28
+                                        height: 32
+                                        radius: 16
+                                        color: playAllHover.containsMouse ? "#D73333" : "#EC4141"
+                                        Label {
+                                            id: playAllLabel
+                                            anchors.centerIn: parent
+                                            text: "播放全部"
+                                            color: "#FFFFFF"
+                                            font.pixelSize: 13
+                                        }
+                                        MouseArea {
+                                            id: playAllHover
+                                            anchors.fill: parent
+                                            hoverEnabled: true
+                                            cursorShape: Qt.PointingHandCursor
+                                            onClicked: appBridge.playAll()
+                                        }
+                                    }
+                                    Rectangle {
+                                        width: playNextLabel.implicitWidth + 28
+                                        height: 32
+                                        radius: 16
+                                        color: playNextHover.containsMouse ? "#FDECEC" : "#FFFFFF"
+                                        border.color: "#EC4141"
+                                        Label {
+                                            id: playNextLabel
+                                            anchors.centerIn: parent
+                                            text: "下一首播放"
+                                            color: "#EC4141"
+                                            font.pixelSize: 13
+                                        }
+                                        MouseArea {
+                                            id: playNextHover
+                                            anchors.fill: parent
+                                            hoverEnabled: true
+                                            cursorShape: Qt.PointingHandCursor
+                                            onClicked: appBridge.playListNext()
+                                        }
+                                    }
+                                    Rectangle {
+                                        visible: !window.playlistOwned && window.playlistSpecial !== 5
+                                        width: visible ? collectLabel.implicitWidth + 28 : 0
+                                        height: visible ? 32 : 0
+                                        radius: 16
+                                        color: collectHover.containsMouse ? (window.playlistCollected ? "#FDECEC" : "#F7F7F8") : "#FFFFFF"
+                                        border.color: window.playlistCollected ? "#EC4141" : "#D8D8DC"
+                                        Label {
+                                            id: collectLabel
+                                            anchors.centerIn: parent
+                                            text: window.playlistCollected ? "已收藏" : "收藏歌单"
+                                            color: window.playlistCollected ? "#EC4141" : "#333333"
+                                            font.pixelSize: 13
+                                        }
+                                        MouseArea {
+                                            id: collectHover
+                                            anchors.fill: parent
+                                            hoverEnabled: true
+                                            cursorShape: Qt.PointingHandCursor
+                                            onClicked: appBridge.toggleSubscribe()
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        ListView {
+                            id: playlistSongs
+                            Layout.fillWidth: true
+                            Layout.fillHeight: true
+                            model: window.songModel
+                            cacheBuffer: 1200
+                            clip: true
+                            boundsBehavior: Flickable.StopAtBounds
+                            onAtYEndChanged: if (atYEnd && count > 0) appBridge.moreSongs()
+                            Connections {
+                                target: window
+                                function onListResetChanged() { playlistSongs.positionViewAtBeginning() }
+                            }
+                            function openRowMenu(row) { songMenuState.open(row) }
+                            delegate: ItemDelegate {
+                                width: playlistSongs.width
+                                height: 56
+                                opacity: model.playable === false ? 0.38 : 1
+                                onDoubleClicked: if (model.playable !== false) appBridge.playRow(index)
+                                onPressAndHold: playlistSongs.openRowMenu(index)
+                                background: Rectangle {
+                                    color: model.songId === window.currentSongId ? "#FDECEC" : (parent.hovered && !playlistSongs.moving ? "#E8F3FF" : "transparent")
+                                }
+                                MouseArea {
+                                    anchors.fill: parent
+                                    acceptedButtons: Qt.RightButton
+                                    onClicked: playlistSongs.openRowMenu(index)
+                                }
+                                RowLayout {
+                                    anchors.fill: parent
+                                    anchors.leftMargin: 16
+                                    anchors.rightMargin: 16
+                                    spacing: 10
+                                    Label { text: index + 1; color: "#8E8E93"; Layout.preferredWidth: 28 }
+                                    Rectangle {
+                                        width: 36
+                                        height: 36
+                                        radius: 8
+                                        color: "#F3D6D6"
+                                        clip: true
+                                        Image {
+                                            anchors.fill: parent
+                                            source: model.local ? Qt.resolvedUrl("file://" + model.local) : ""
+                                            sourceSize: Qt.size(36, 36)
+                                            fillMode: Image.PreserveAspectCrop
+                                            asynchronous: true
+                                        }
+                                    }
+                                    Label {
+                                        text: model.name || ""
+                                        color: model.songId === window.currentSongId ? "#EC4141" : "#333333"
+                                        Layout.fillWidth: true
+                                        elide: Text.ElideRight
+                                    }
+                                    Label { text: model.artist || ""; color: "#8E8E93"; Layout.preferredWidth: 140; elide: Text.ElideRight }
+                                    Label { text: clock(model.duration); color: "#8E8E93"; Layout.preferredWidth: 48 }
+                                }
+                            }
+                        }
+                    }
+                }
                 Loader {
                     active: window.pageName === "album"
                     Layout.fillWidth: true
@@ -1589,22 +1925,79 @@ ApplicationWindow {
                 }
                 }
 
-                ListView {
-                    id: downloadView
+                ColumnLayout {
                     Layout.fillWidth: true
                     Layout.fillHeight: true
-                    model: window.downloadModel
-                    clip: true
-                    delegate: Item {
-                        width: downloadView.width
-                        height: 36
-                        RowLayout {
-                            anchors.fill: parent
-                            anchors.leftMargin: 16
-                            anchors.rightMargin: 16
-                            Label { text: name; Layout.fillWidth: true; elide: Text.ElideRight; color: "#333333" }
-                            Label { text: status; color: "#8E8E93"; Layout.preferredWidth: 80 }
-                            Label { text: quality; color: "#8E8E93"; Layout.preferredWidth: 110; elide: Text.ElideRight }
+                    spacing: 0
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Layout.leftMargin: 16
+                        Layout.rightMargin: 16
+                        Layout.topMargin: 8
+                        Layout.preferredHeight: 32
+                        Label {
+                            text: "文件保存在「音乐 / 网易云音乐」。这里只列出本机下载过的歌曲。"
+                            color: "#8E8E93"
+                            font.pixelSize: 12
+                            elide: Text.ElideRight
+                            Layout.fillWidth: true
+                        }
+                        Button {
+                            text: "打开文件夹"
+                            flat: true
+                            onClicked: appBridge.openDownloadFolder()
+                        }
+                    }
+                    Label {
+                        visible: downloadView.count === 0
+                        text: "还没有下载。在歌曲上右键选择「下载」，完成后会出现在这里。"
+                        color: "#8E8E93"
+                        font.pixelSize: 14
+                        Layout.fillWidth: true
+                        Layout.topMargin: 48
+                        horizontalAlignment: Text.AlignHCenter
+                    }
+                    ListView {
+                        id: downloadView
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        model: window.downloadModel
+                        clip: true
+                        header: Item {
+                            width: downloadView.width
+                            height: 28
+                            visible: downloadView.count > 0
+                            RowLayout {
+                                anchors.fill: parent
+                                anchors.leftMargin: 16
+                                anchors.rightMargin: 16
+                                Label { text: "歌曲"; color: "#8E8E93"; font.pixelSize: 12; Layout.fillWidth: true }
+                                Label { text: "状态"; color: "#8E8E93"; font.pixelSize: 12; Layout.preferredWidth: 88 }
+                                Label { text: "音质"; color: "#8E8E93"; font.pixelSize: 12; Layout.preferredWidth: 120 }
+                                Label { text: "文件"; color: "#8E8E93"; font.pixelSize: 12; Layout.preferredWidth: 180 }
+                            }
+                        }
+                        delegate: Item {
+                            width: downloadView.width
+                            height: 40
+                            Rectangle {
+                                anchors.fill: parent
+                                color: index % 2 === 0 ? "transparent" : "#FAFAFB"
+                            }
+                            RowLayout {
+                                anchors.fill: parent
+                                anchors.leftMargin: 16
+                                anchors.rightMargin: 16
+                                Label { text: name; Layout.fillWidth: true; elide: Text.ElideRight; color: "#333333" }
+                                Label {
+                                    text: status
+                                    color: status === "完成" ? "#3C9D5B" : (String(status).indexOf("失败") === 0 ? "#EC4141" : "#8E8E93")
+                                    Layout.preferredWidth: 88
+                                    elide: Text.ElideRight
+                                }
+                                Label { text: quality; color: "#8E8E93"; Layout.preferredWidth: 120; elide: Text.ElideRight }
+                                Label { text: path; color: "#8E8E93"; Layout.preferredWidth: 180; elide: Text.ElideRight }
+                            }
                         }
                     }
                 }
@@ -1619,6 +2012,7 @@ ApplicationWindow {
                 width: 240
                 height: 250
                 visible: window.loginKey !== ""
+                closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
                 onClosed: appBridge.cancelLogin()
                 Column {
                     anchors.fill: parent
@@ -1678,20 +2072,26 @@ ApplicationWindow {
             onToggleDeskLyric: appBridge.toggleDeskLyric()
             onPickQuality: appBridge.setQuality(level)
             onShowQueue: {
-                if (queuePopup.visible)
+                if (queuePopup.visible) {
                     queuePopup.close()
-                else {
-                    queuePopup.open()
-                    Qt.callLater(queueView.centerCurrent)
+                    return
                 }
+                playBar.closeFloats()
+                queuePopup.open()
+                Qt.callLater(queueView.centerCurrent)
             }
             onToggleLike: appBridge.toggleLike(-1)
             onOpenComments: appBridge.openComments(-1)
             onCollect: {
+                playBar.closeFloats()
                 appBridge.openCollect()
                 collectPopup.open()
             }
-            onOpenMore: moreMenu.popup()
+            onOpenMore: {
+                playBar.closeFloats()
+                moreMenu.popup()
+            }
+            onDismissPopups: window.closeFloats()
             onOpenArtist: appBridge.openCurrentArtist()
             onPickArtist: appBridge.openArtist(artistId, name)
         }
@@ -1724,6 +2124,15 @@ ApplicationWindow {
     Item {
         id: keySink
         focus: true
+    }
+
+    function closeFloats() {
+        moreMenu.close()
+        accountPopup.close()
+        queuePopup.close()
+        collectPopup.close()
+        if (suggestPopup.visible)
+            leaveSearch()
     }
 
     function leaveSearch() {

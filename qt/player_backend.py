@@ -62,6 +62,7 @@ class PlayerBackend(QObject):
         self._seek_stamp = 0.0
         self._rate = 1.0
         self._clock = None
+        self._held_pause = False
         self._lock = threading.Lock()
         bus = self.playbin.get_bus()
         bus.add_signal_watch()
@@ -132,6 +133,7 @@ class PlayerBackend(QObject):
             pass
         with self._lock:
             self._want = "paused"
+            self._held_pause = True
             self._position = held
             self._anchor = held
             self._started_at = 0
@@ -153,8 +155,9 @@ class PlayerBackend(QObject):
         with self._lock:
             held = self._position
             self._want = "playing"
+            self._held_pause = False
             self._anchor = held
-            # 续播定位还没落地。先不走进度，等 ASYNC_DONE 或定位到达再开始。
+            # 续播定位还没落地。先不走进度，等定位到达再开始。
             self._started_at = 0
             self._seek_target = held if held > 500 else None
             self._seek_stamp = time.time()
@@ -169,12 +172,15 @@ class PlayerBackend(QObject):
         self._ensure_clock()
         if held > 500:
             threading.Thread(target=self._seek_worker, args=(held,), daemon=True).start()
+        else:
+            self.stateChanged.emit("playing")
         return True
 
     @pyqtSlot()
     def stop(self):
         with self._lock:
             self._want = "stopped"
+            self._held_pause = False
             self._started_at = 0
         self.playbin.set_state(Gst.State.NULL)
         self._uri = ""
@@ -216,15 +222,40 @@ class PlayerBackend(QObject):
     def _on_message(self, _bus, message):
         if message.type == Gst.MessageType.EOS:
             with self._lock:
-                self._want = "paused"
-                self._started_at = 0
+                held = self._held_pause or self._want != "playing"
+                kept = self._position
+                if held:
+                    # 暂停太久时连接会被掐断。这不是唱完，进度留在暂停处，下次重开这首。
+                    self._want = "paused"
+                    self._held_pause = True
+                    self._started_at = 0
+                    self._uri = ""
+                    self._position = kept
+                    self._anchor = kept
+                else:
+                    self._want = "paused"
+                    self._started_at = 0
+            if held:
+                self.playbin.set_state(Gst.State.NULL)
+                self.stateChanged.emit("paused")
+                return
             self.stateChanged.emit("paused")
             self.ended.emit()
         elif message.type == Gst.MessageType.ERROR:
             err, _debug = message.parse_error()
             with self._lock:
-                self._want = "stopped"
-                self._started_at = 0
+                held = self._held_pause
+                if held:
+                    self._want = "paused"
+                    self._started_at = 0
+                    self._uri = ""
+                else:
+                    self._want = "stopped"
+                    self._started_at = 0
+            if held:
+                self.playbin.set_state(Gst.State.NULL)
+                self.stateChanged.emit("paused")
+                return
             self.stateChanged.emit("stopped")
             self.errorChanged.emit(str(err).split("\n", 1)[0])
         elif message.type == Gst.MessageType.ASYNC_DONE and self._want == "playing":
@@ -332,8 +363,11 @@ class PlayerBackend(QObject):
                     Gst.SeekFlags.FLUSH | Gst.SeekFlags.KEY_UNIT,
                     int(target) * Gst.MSECOND,
                 )
-            # 跳完后恢复播放。上面为了能定位可能停在暂停。
-            if self._want == "playing":
+            # 已经在播放时再切一次 PLAYING，会把刚跳到的位置清回开头。
+            if self._want != "playing":
+                return
+            _ok, state, _pending = self.playbin.get_state(0)
+            if state != Gst.State.PLAYING:
                 self.playbin.set_state(Gst.State.PLAYING)
         except Exception:
             with self._lock:

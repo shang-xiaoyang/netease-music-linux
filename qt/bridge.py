@@ -21,7 +21,7 @@ if ROOT not in sys.path:
 import netease_api as api
 
 from qt.models import DictListModel
-from qt.paths import COOKIE_PATH, DATA_DIR, LYRIC_PATH, LYRIC_STATE_PATH, LYRIC_TRACK_PATH, RECENT_PATH, STATE_PATH, VOLUME_PATH, player_script
+from qt.paths import COOKIE_PATH, DATA_DIR, DOWNLOAD_INDEX, LYRIC_PATH, LYRIC_STATE_PATH, LYRIC_TRACK_PATH, RECENT_PATH, STATE_PATH, VOLUME_PATH, player_script
 from qt.playback_cache import lookup as cache_lookup
 from qt.playback_cache import store as cache_store
 from qt.player_backend import PlayerBackend, allowed_uri
@@ -52,6 +52,7 @@ class AppBridge(QObject):
     lyricChanged = pyqtSignal(str)
     deskLyricChanged = pyqtSignal(bool)
     detailChanged = pyqtSignal(str)
+    playlistMetaChanged = pyqtSignal(str)
     loginKeyChanged = pyqtSignal(str)
     qualitiesChanged = pyqtSignal(str)
     suggestChanged = pyqtSignal(str)
@@ -66,8 +67,8 @@ class AppBridge(QObject):
         self.player.ended.connect(self._on_ended)
         self.songs = DictListModel(("songId", "name", "artist", "artistId", "artists", "album", "albumId", "cover", "local", "duration", "vip", "playable"))
         self.queue = DictListModel(("songId", "name", "artist", "cover", "duration", "playable"))
-        self.nav = DictListModel(("key", "label", "kind", "section", "cover", "local"))
-        self.cards = DictListModel(("itemId", "name", "cover", "local", "count", "kind"))
+        self.nav = DictListModel(("key", "label", "kind", "section", "cover", "local", "owned"))
+        self.cards = DictListModel(("itemId", "name", "cover", "local", "count", "kind", "creator"))
         self.collects = DictListModel(("itemId", "name", "cover", "local", "count", "kind"))
         self.albums = DictListModel(("itemId", "name", "cover", "local", "publish"))
         self.comments = DictListModel(("nickname", "userId", "avatar", "local", "content", "when", "liked", "hot"))
@@ -102,7 +103,7 @@ class AppBridge(QObject):
         self._comment_tab = "hot"
         self._comment_data = {}
         self._can_remove = False
-        self._download_rows = []
+        self._download_rows = self._load_downloads()
         self._download_worker = None
         self._supported = []
         self._list_token = 0
@@ -159,6 +160,22 @@ class AppBridge(QObject):
                 self._apply_albums(payload)
             elif kind == "detail":
                 self._apply_detail(*payload)
+            elif kind == "playlistMeta":
+                self.playlistMetaChanged.emit(
+                    f"{payload.get('owned') and 1 or 0}|{payload.get('collected') and 1 or 0}|{payload.get('special') or 0}"
+                )
+            elif kind == "queueNext":
+                songs, name = payload[0], payload[1]
+                append = payload[2] if len(payload) > 2 else False
+                self._queue_songs_next(songs, name, append=append)
+            elif kind == "home":
+                self.openHome()
+            elif kind == "renamed":
+                playlist_id, name = payload
+                if str(self._list_id) == playlist_id and self._page == "playlist":
+                    self._page_title = name
+                    self.pageChanged.emit("playlist", name)
+                self.statusChanged.emit(f"已重命名为「{name}」")
             elif kind == "account":
                 self.accountChanged.emit(payload)
             elif kind == "status":
@@ -230,13 +247,13 @@ class AppBridge(QObject):
                 model.set_field(index, "local", path)
 
     def _fill_nav(self):
-        blank = {"cover": "", "local": ""}
+        blank = {"cover": "", "local": "", "owned": False}
         rows = [
             {"key": "home", "label": "推荐", "kind": "home", "section": "", **blank},
             {"key": "discover", "label": "热门歌单", "kind": "discover", "section": "", **blank},
         ]
         rows.extend(
-            {"key": str(cid), "label": name, "kind": "chart", "section": "", **blank}
+            {"key": str(cid), "label": name, "kind": "chart", "section": "", "owned": False, **blank}
             for cid, name in api.CHARTS[:4]
         )
         if self._profile:
@@ -496,8 +513,8 @@ class AppBridge(QObject):
                 self.player.stop()
                 self.currentSongChanged.emit("")
 
-    @staticmethod
-    def _playlist_nav(items):
+    def _playlist_nav(self, items):
+        uid = str((self._profile or {}).get("userId") or "")
         return [
             {
                 "key": str(item.get("id") or ""),
@@ -506,6 +523,7 @@ class AppBridge(QObject):
                 "section": "",
                 "cover": item.get("cover") or "",
                 "local": "",
+                "owned": bool(uid) and str(item.get("creator") or "") == uid and item.get("special") != 5,
             }
             for item in items
         ]
@@ -655,6 +673,7 @@ class AppBridge(QObject):
                 "local": "",
                 "count": 0,
                 "kind": "chart",
+                "creator": "",
             })
         for item in playlists:
             rows.append({
@@ -664,6 +683,7 @@ class AppBridge(QObject):
                 "local": "",
                 "count": int(item.get("count") or 0),
                 "kind": "playlist",
+                "creator": "",
             })
         self._post("cards", (rows, "推荐已更新"))
         self._queue_covers((item.get("cover") for item in rows), 148, "card")
@@ -689,7 +709,7 @@ class AppBridge(QObject):
 
     @pyqtSlot(str, str)
     def openPlaylist(self, playlist_id, name):
-        self._show("list", name or "歌单")
+        self._show("playlist", name or "歌单")
         self._begin_list()
         self._list_id = str(playlist_id)
         self.songs.replace([])
@@ -709,6 +729,26 @@ class AppBridge(QObject):
         songs = page.get("songs") or []
         total = page.get("total") or len(songs)
         title = name or page.get("name") or "歌单"
+        creator = page.get("creatorName") or ""
+        desc = (page.get("description") or "").strip().replace("\n", " ")
+        if len(desc) > 160:
+            desc = desc[:160] + "…"
+        mine = self._playlist_relation(page.get("id") or playlist_id, page.get("creator"))
+        sub = " · ".join(item for item in (creator, f"{total} 首") if item)
+        self._post("detail", (
+            "playlist",
+            title,
+            sub,
+            desc,
+            page.get("cover") or "",
+        ))
+        self._playlist_meta = {
+            "id": str(page.get("id") or playlist_id),
+            "owned": mine == "owned",
+            "collected": mine == "collected" or bool(page.get("subscribed")),
+            "special": int(page.get("special") or 0),
+        }
+        self._post("playlistMeta", self._playlist_meta)
         rows = self._song_rows(songs)
         shown = len(songs)
         self._post("songs", (
@@ -717,6 +757,18 @@ class AppBridge(QObject):
             total, title, page.get("refs") or [],
         ))
         self._cache_song_covers(rows)
+
+    def _playlist_relation(self, playlist_id, creator):
+        """owned 是自己创建的，collected 是收藏来的。我喜欢不算可删除的自建歌单。"""
+        uid = str((self._profile or {}).get("userId") or "")
+        found = next((item for item in self._mine if str(item.get("id")) == str(playlist_id)), None)
+        owner = str((found or {}).get("creator") or creator or "")
+        special = int((found or {}).get("special") or 0)
+        if uid and owner == uid and special != 5:
+            return "owned"
+        if found and owner != uid:
+            return "collected"
+        return ""
 
     @pyqtSlot()
     def moreSongs(self):
@@ -926,7 +978,20 @@ class AppBridge(QObject):
     @pyqtSlot()
     def openDownloads(self):
         self._show("downloads", "下载管理")
-        self._post("downloads", list(self._download_rows))
+        self._post("downloads", self._download_view())
+
+    @pyqtSlot(result=str)
+    def downloadFolder(self):
+        return os.path.join(os.path.expanduser("~/Music"), "网易云音乐")
+
+    @pyqtSlot()
+    def openDownloadFolder(self):
+        folder = self.downloadFolder()
+        try:
+            os.makedirs(folder, exist_ok=True)
+            subprocess.Popen(["xdg-open", folder], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError:
+            self.statusChanged.emit("打不开下载目录")
 
     @pyqtSlot(str)
     def suggest(self, keyword):
@@ -985,8 +1050,51 @@ class AppBridge(QObject):
             return
         self._show("list", f"搜索「{text}」")
         token = self._begin_list()
+        self._search_keyword = text
         self.songs.replace([])
         threading.Thread(target=self._search, args=(text, token), daemon=True).start()
+
+    @pyqtSlot(str)
+    def searchTab(self, tab):
+        """搜索结果里切换单曲和歌单。歌单只在点开时才请求。"""
+        keyword = getattr(self, "_search_keyword", "")
+        if not keyword or tab not in ("songs", "playlists"):
+            return
+        if tab == "songs":
+            self._show("list", f"搜索「{keyword}」")
+            token = self._begin_list()
+            self.songs.replace([])
+            threading.Thread(target=self._search, args=(keyword, token), daemon=True).start()
+            return
+        self._show("discover", f"歌单「{keyword}」")
+        # 换一个列表记号，晚到的单曲结果就不会画到歌单页上。
+        token = self._begin_list()
+        self.cards.replace([])
+        threading.Thread(target=self._search_playlists, args=(keyword, token), daemon=True).start()
+
+    def _search_playlists(self, keyword, token):
+        try:
+            playlists = api.search_playlists(keyword, cookie=self._cookie)
+        except api.ApiError as exc:
+            if token == self._list_token:
+                self._post("status", str(exc))
+            return
+        if token != self._list_token:
+            return
+        rows = [
+            {
+                "itemId": str(item.get("id") or ""),
+                "name": item.get("name") or "歌单",
+                "cover": item.get("cover") or "",
+                "local": "",
+                "count": int(item.get("count") or 0),
+                "kind": "playlist",
+                "creator": item.get("creatorName") or "",
+            }
+            for item in playlists
+        ]
+        self._post("cards", (rows, f"找到 {len(rows)} 个歌单"))
+        self._queue_covers((item.get("cover") for item in playlists), 120, "card")
 
     @pyqtSlot()
     def openDiscover(self):
@@ -1013,6 +1121,7 @@ class AppBridge(QObject):
                 "local": "",
                 "count": int(item.get("count") or 0),
                 "kind": "playlist",
+                "creator": item.get("creatorName") or "",
             }
             for item in playlists
         ], f"热门歌单 {len(playlists)} 个"))
@@ -1341,6 +1450,174 @@ class AppBridge(QObject):
         self.queue.replace(self._queue)
         self.statusChanged.emit(f"下一首播放 {song.get('name') or ''}")
 
+    @pyqtSlot()
+    def playAll(self):
+        first = next((i for i, item in enumerate(self.songs._rows) if item.get("songId") and item.get("playable") is not False), -1)
+        if first < 0:
+            self.statusChanged.emit("没有可播放的歌曲")
+            return
+        self.playRow(first)
+
+    @pyqtSlot()
+    def playListNext(self):
+        playlist_id = str(self._list_id or "")
+        loaded = [
+            dict(item) for item in self.songs._rows
+            if item.get("songId") and item.get("playable") is not False
+        ]
+        # 歌单还没翻完时，已显示的先插进去，剩下的在后台补上。
+        if playlist_id and self._list_refs and self._list_offset < self._list_total:
+            self._queue_songs_next(loaded, self._page_title or "歌单")
+            self.statusChanged.emit("正在加入整张歌单…")
+            threading.Thread(
+                target=self._play_nav_next,
+                args=(playlist_id, self._page_title or "歌单", {item.get("songId") for item in loaded}),
+                daemon=True,
+            ).start()
+            return
+        self._queue_songs_next(loaded, self._page_title or "歌单")
+
+    @pyqtSlot(str)
+    def playNavNext(self, key):
+        row = next((item for item in self.nav._rows if item.get("key") == key), None)
+        if not row or row.get("kind") not in ("playlist", "liked", "chart"):
+            return
+        playlist_id = key if row.get("kind") != "liked" else ""
+        if row.get("kind") == "liked":
+            liked = next((item for item in self._mine if item.get("special") == 5), None)
+            playlist_id = str((liked or {}).get("id") or "")
+        if not playlist_id:
+            self.statusChanged.emit("还没有可加入的歌单")
+            return
+        self.statusChanged.emit("正在加入播放列表…")
+        threading.Thread(target=self._play_nav_next, args=(playlist_id, row.get("label") or "歌单"), daemon=True).start()
+
+    def _play_nav_next(self, playlist_id, name, skip=None):
+        try:
+            data = api.playlist_tracks(playlist_id, cookie=self._cookie)
+        except api.ApiError as exc:
+            self._post("status", str(exc))
+            return
+        seen = set(skip or ())
+        songs = [
+            item for item in self._song_rows(data.get("songs") or [])
+            if item.get("songId") and item.get("playable") is not False and item.get("songId") not in seen
+        ]
+        self._post("queueNext", (songs, name, bool(skip)))
+
+    def _queue_songs_next(self, songs, name, append=False):
+        songs = [dict(item) for item in songs if item.get("songId")]
+        if not songs:
+            if not append:
+                self.statusChanged.emit("没有可播放的歌曲")
+            return
+        if not self._queue:
+            self._queue = songs
+            self.queue.replace(self._queue)
+            self._play_index(0)
+            return
+        if append:
+            insert_at = len(self._queue)
+        else:
+            insert_at = min(len(self._queue), max(0, self._index) + 1)
+        self._queue[insert_at:insert_at] = songs
+        self.queue.replace(self._queue)
+        if append:
+            self.statusChanged.emit(f"「{name}」又加入 {len(songs)} 首")
+        else:
+            self.statusChanged.emit(f"已将「{name}」{len(songs)} 首加到下一首")
+
+    @pyqtSlot()
+    def toggleSubscribe(self):
+        playlist_id = str(self._list_id or "")
+        if not playlist_id:
+            return
+        if not self._require_login("收藏歌单"):
+            return
+        meta = getattr(self, "_playlist_meta", {}) or {}
+        if meta.get("owned") or int(meta.get("special") or 0) == 5:
+            self.statusChanged.emit("这是自己的歌单")
+            return
+        subscribe = not meta.get("collected")
+        threading.Thread(target=self._subscribe, args=(playlist_id, subscribe), daemon=True).start()
+
+    def _subscribe(self, playlist_id, subscribe):
+        try:
+            api.subscribe_playlist(playlist_id, subscribe, self._cookie)
+            uid = (self._profile or {}).get("userId")
+            self._mine = api.user_playlists(uid, self._cookie) if uid else self._mine
+        except api.ApiError as exc:
+            self._post("status", str(exc))
+            return
+        meta = dict(getattr(self, "_playlist_meta", {}) or {})
+        if str(meta.get("id") or "") == str(playlist_id):
+            meta["collected"] = subscribe
+            self._playlist_meta = meta
+            self._post("playlistMeta", meta)
+        self._post("nav", None)
+        self._post("status", "已收藏歌单" if subscribe else "已取消收藏")
+
+    @pyqtSlot(str, str)
+    def renameNavPlaylist(self, key, name):
+        name = (name or "").strip()
+        if not name:
+            self.statusChanged.emit("歌单名称不能为空")
+            return
+        if not self._owned_playlist(key):
+            self.statusChanged.emit("只能重命名自己创建的歌单")
+            return
+        threading.Thread(target=self._rename_playlist, args=(key, name[:40]), daemon=True).start()
+
+    def _rename_playlist(self, playlist_id, name):
+        try:
+            api.rename_playlist(playlist_id, name, self._cookie)
+            uid = (self._profile or {}).get("userId")
+            self._mine = api.user_playlists(uid, self._cookie) if uid else self._mine
+        except api.ApiError as exc:
+            self._post("status", str(exc))
+            return
+        self._post("nav", None)
+        self._post("renamed", (str(playlist_id), name))
+
+    @pyqtSlot(str)
+    def deleteNavPlaylist(self, key):
+        if not self._owned_playlist(key):
+            self.statusChanged.emit("只能删除自己创建的歌单")
+            return
+        threading.Thread(target=self._delete_playlist, args=(key,), daemon=True).start()
+
+    def _delete_playlist(self, playlist_id):
+        try:
+            api.delete_playlist(playlist_id, self._cookie)
+            uid = (self._profile or {}).get("userId")
+            self._mine = api.user_playlists(uid, self._cookie) if uid else self._mine
+        except api.ApiError as exc:
+            self._post("status", str(exc))
+            return
+        self._post("nav", None)
+        if str(self._list_id) == str(playlist_id):
+            self._post("home", None)
+        self._post("status", "歌单已删除")
+
+    @pyqtSlot(str)
+    def unsubscribeNav(self, key):
+        if self._owned_playlist(key) or not any(str(item.get("id")) == str(key) for item in self._mine):
+            self.statusChanged.emit("只能取消收藏别人的歌单")
+            return
+        if not self._require_login("取消收藏"):
+            return
+        threading.Thread(target=self._subscribe, args=(key, False), daemon=True).start()
+
+    def _owned_playlist(self, playlist_id):
+        uid = str((self._profile or {}).get("userId") or "")
+        return any(
+            str(item.get("id")) == str(playlist_id)
+            and uid
+            and str(item.get("creator") or "") == uid
+            and item.get("special") != 5
+            for item in self._mine
+        )
+
     @pyqtSlot(int)
     def toggleLike(self, row):
         song = self._song if row < 0 else self.songs.get(row)
@@ -1381,11 +1658,12 @@ class AppBridge(QObject):
             return
         if self._song and self.player.has_source():
             held = self.player.position()[0]
-            self.player.resume()
-            self._publish_desk_lyric(held)
-            self.statusChanged.emit("继续播放")
-            return
+            if self.player.resume():
+                self._publish_desk_lyric(held)
+                self.statusChanged.emit("继续播放")
+                return
         if self._song:
+            # 源已经失效时，从记下的进度重开这首，不要当成唱完切下一首。
             self._resume_at = self.player.position()[0]
             self._play_index(self._index)
 
@@ -1502,7 +1780,9 @@ class AppBridge(QObject):
                     headers={"User-Agent": api.UA, "Referer": "https://music.163.com/"},
                 )
                 with urllib.request.urlopen(req, timeout=15) as resp:
-                    data = resp.read()
+                    data = resp.read(2 * 1024 * 1024 + 1)
+                if len(data) > 2 * 1024 * 1024:
+                    raise OSError("封面过大")
                 tmp = path + ".part"
                 with open(tmp, "wb") as handle:
                     handle.write(data)
@@ -1994,6 +2274,7 @@ class AppBridge(QObject):
             "level": self._quality,
         }
         self._download_rows.append(item)
+        self._save_downloads()
         self._post("downloads", self._download_view())
         self._post("status", f"已加入下载：{item['name']} · {item['quality']}")
         if self._download_worker is None or not self._download_worker.is_alive():
@@ -2001,14 +2282,62 @@ class AppBridge(QObject):
             self._download_worker.start()
 
     def _download_view(self):
-        return [
-            {"name": item["name"], "status": item["status"], "quality": item["quality"], "path": os.path.basename(item.get("path") or "")}
-            for item in self._download_rows
+        rows = []
+        for item in self._download_rows:
+            path = item.get("path") or ""
+            rows.append({
+                "name": item.get("name") or "",
+                "status": item.get("status") or "",
+                "quality": item.get("quality") or "",
+                "path": os.path.basename(path) if path else "",
+            })
+        return rows
+
+    def _load_downloads(self):
+        try:
+            payload = json.loads(open(DOWNLOAD_INDEX, encoding="utf-8").read())
+        except (OSError, json.JSONDecodeError):
+            return []
+        rows = []
+        for item in payload if isinstance(payload, list) else []:
+            if not isinstance(item, dict) or not item.get("name"):
+                continue
+            status = item.get("status") or ""
+            if status in ("等待", "下载中"):
+                status = "未完成"
+            rows.append({
+                "name": item.get("name") or "",
+                "status": status,
+                "quality": item.get("quality") or "",
+                "path": item.get("path") or "",
+            })
+        return rows[-80:]
+
+    def _save_downloads(self):
+        payload = [
+            {
+                "name": item.get("name") or "",
+                "status": item.get("status") or "",
+                "quality": item.get("quality") or "",
+                "path": item.get("path") or "",
+            }
+            for item in self._download_rows[-80:]
         ]
+        try:
+            os.makedirs(DATA_DIR, exist_ok=True)
+            tmp = DOWNLOAD_INDEX + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, ensure_ascii=False)
+            os.replace(tmp, DOWNLOAD_INDEX)
+        except OSError:
+            pass
 
     def _download_loop(self):
         for item in self._download_rows:
             if item.get("status") != "等待":
+                continue
+            if not item.get("song"):
+                item["status"] = "未完成"
                 continue
             item["status"] = "下载中"
             self._post("downloads", self._download_view())
@@ -2016,11 +2345,13 @@ class AppBridge(QObject):
                 path, level = self._download_one(item["song"], item["level"])
             except Exception as exc:
                 item["status"] = f"失败：{exc}"
+                self._save_downloads()
                 self._post("downloads", self._download_view())
                 continue
             item["status"] = "完成"
             item["path"] = path
             item["quality"] = api.QUALITY_LABEL.get(level, level)
+            self._save_downloads()
             self._post("downloads", self._download_view())
             self._post("status", f"下载完成：{os.path.basename(path)}")
 
@@ -2244,6 +2575,8 @@ class AppBridge(QObject):
             self._publish_desk_lyric(pos)
 
     def _on_ended(self):
+        if getattr(self.player, "_held_pause", False):
+            return
         self._step(1)
 
     def _emit_clock(self):
