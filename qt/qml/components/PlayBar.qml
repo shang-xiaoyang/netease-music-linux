@@ -5,7 +5,7 @@ import QtQuick.Layouts 1.15
 Rectangle {
     id: bar
     color: "#FFFFFF"
-    implicitHeight: 64
+    implicitHeight: 78
 
     property bool playing: false
     property bool liked: false
@@ -46,12 +46,48 @@ Rectangle {
         return "repeat"
     }
 
+    function clock(ms) {
+        var value = Math.max(0, Math.floor(Number(ms || 0) / 1000))
+        var min = Math.floor(value / 60)
+        var sec = value % 60
+        return (min < 10 ? "0" : "") + min + ":" + (sec < 10 ? "0" : "") + sec
+    }
+
+    Label {
+        id: elapsedLabel
+        anchors.left: parent.left
+        anchors.leftMargin: 12
+        anchors.top: parent.top
+        anchors.topMargin: 4
+        width: 40
+        horizontalAlignment: Text.AlignLeft
+        text: bar.clock(bar.position)
+        color: "#666666"
+        font.pixelSize: 11
+        font.family: "monospace"
+    }
+
+    Label {
+        id: durationLabel
+        anchors.right: parent.right
+        anchors.rightMargin: 12
+        anchors.top: parent.top
+        anchors.topMargin: 4
+        width: 40
+        horizontalAlignment: Text.AlignRight
+        text: bar.clock(bar.duration)
+        color: "#666666"
+        font.pixelSize: 11
+        font.family: "monospace"
+    }
+
     Slider {
         id: progress
-        anchors.left: parent.left
-        anchors.right: parent.right
-        anchors.top: parent.top
-        anchors.topMargin: -7
+        anchors.left: elapsedLabel.right
+        anchors.leftMargin: 6
+        anchors.right: durationLabel.left
+        anchors.rightMargin: 6
+        anchors.verticalCenter: elapsedLabel.verticalCenter
         height: 16
         from: 0
         to: Math.max(1, bar.duration)
@@ -59,7 +95,7 @@ Rectangle {
         onMoved: bar.seekTo(Math.round(value))
         hoverEnabled: true
         ToolTip.visible: hovered
-        ToolTip.text: "点击或拖动进度条跳转"
+        ToolTip.text: bar.clock(bar.position) + " / " + bar.clock(bar.duration)
         ToolTip.delay: 400
 
         background: Rectangle {
@@ -88,7 +124,8 @@ Rectangle {
         id: leftCluster
         anchors.left: parent.left
         anchors.leftMargin: 12
-        anchors.verticalCenter: parent.verticalCenter
+        anchors.top: elapsedLabel.bottom
+        anchors.topMargin: 4
         spacing: 8
 
         Image {
@@ -195,7 +232,7 @@ Rectangle {
 
     Row {
         anchors.horizontalCenter: parent.horizontalCenter
-        anchors.verticalCenter: parent.verticalCenter
+        anchors.verticalCenter: leftCluster.verticalCenter
         spacing: 2
         IconButton { iconName: bar.modeKind() === "shuffle" ? "media-playlist-shuffle-symbolic" : bar.modeKind() === "single" ? "media-playlist-repeat-one-symbolic" : bar.modeKind() === "order" ? "media-playlist-consecutive-symbolic" : "media-playlist-repeat-symbolic"; tip: bar.mode; onClicked: bar.cycleMode() }
         IconButton { iconName: "media-skip-backward-symbolic"; tip: "上一首"; onClicked: bar.previousTrack() }
@@ -207,7 +244,7 @@ Rectangle {
     Row {
         anchors.right: parent.right
         anchors.rightMargin: 8
-        anchors.verticalCenter: parent.verticalCenter
+        anchors.verticalCenter: leftCluster.verticalCenter
         spacing: 0
         Item {
             id: qualityButton

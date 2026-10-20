@@ -7,6 +7,8 @@ import os
 import urllib.request
 
 LIMIT = 1024 * 1024 * 1024
+# 单首缓存不再往下读。母带再大也远小于这个值，异常响应不能写满磁盘。
+MAX_TRACK = 200 * 1024 * 1024
 CACHE_DIR = os.path.join(os.path.expanduser("~/.cache"), "netease-cloud-music", "playback")
 INDEX_PATH = os.path.join(CACHE_DIR, "index.json")
 
@@ -66,12 +68,23 @@ def store(song_id, level, ext, url, current_path=""):
     os.makedirs(CACHE_DIR, exist_ok=True)
     part = dest + ".part"
     req = urllib.request.Request(url, headers={"User-Agent": "netease-music-linux", "Referer": "https://music.163.com/"})
-    with urllib.request.urlopen(req, timeout=60) as resp, open(part, "wb") as handle:
-        while True:
-            chunk = resp.read(65536)
-            if not chunk:
-                break
-            handle.write(chunk)
+    written = 0
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp, open(part, "wb") as handle:
+            while True:
+                chunk = resp.read(65536)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if written > MAX_TRACK:
+                    raise OSError("缓存文件过大")
+                handle.write(chunk)
+    except Exception:
+        try:
+            os.remove(part)
+        except OSError:
+            pass
+        raise
     os.replace(part, dest)
     index = _load()
     index[f"{song_id}:{level}"] = {

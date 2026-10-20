@@ -117,7 +117,7 @@ def search_suggest(keyword, cookie="", limit=8):
         song = _song(item)
         if song.get("id") and song.get("name"):
             rows.append(song)
-    return rows
+    return _mark_playable(rows, cookie)
 
 
 def search_songs(keyword, limit=30, offset=0, cookie=""):
@@ -128,8 +128,8 @@ def search_songs(keyword, limit=30, offset=0, cookie=""):
     )
     result = payload.get("result") or {}
     songs = [_song(item) for item in result.get("songs") or []]
-    # 网页搜索不返回封面。专辑封面在歌曲详情里，补上后列表才能显示。
-    return attach_covers(songs, cookie)
+    # 网页搜索不返回封面，也不带播放权限。一次详情请求把两样都补上。
+    return _complete_songs(songs, cookie)
 
 
 def top_playlist(limit=24, cookie=""):
@@ -197,16 +197,23 @@ def _songs_by_ids(refs, cookie):
     if not ids:
         return []
     detail = request("/api/v3/song/detail", {"c": json.dumps([{"id": int(sid)} for sid in ids])}, cookie=cookie)
-    by_id = {item.get("id"): _song(item, added.get(item.get("id")) or 0) for item in detail.get("songs") or []}
+    privileges = {item.get("id"): item for item in detail.get("privileges") or []}
+    by_id = {}
+    for item in detail.get("songs") or []:
+        song = _song(item, added.get(item.get("id")) or 0)
+        _apply_privilege(song, privileges.get(item.get("id")))
+        by_id[item.get("id")] = song
     songs = [by_id[sid] for sid in ids if sid in by_id]
     if len(songs) < len(ids) // 2:
         # v3 对部分榜单只回一半。旧详情接口能补上歌名，封面仍走 v3 已有的结果。
         legacy = request("/api/song/detail", {"ids": json.dumps([int(sid) for sid in ids])}, cookie=cookie)
+        privileges.update({item.get("id"): item for item in legacy.get("privileges") or []})
         for item in legacy.get("songs") or []:
             if item.get("id") in by_id:
                 continue
             song = _song(item, added.get(item.get("id")) or 0)
             song["cover"] = by_id.get(item.get("id"), {}).get("cover") or song.get("cover") or ""
+            _apply_privilege(song, privileges.get(item.get("id")))
             by_id[item.get("id")] = song
         songs = [by_id[sid] for sid in ids if sid in by_id]
     return songs
@@ -216,7 +223,13 @@ def _chart_songs(playlist_id, cookie):
     """官方榜的 v6 详情没有曲目。榜单接口一次返回榜上的歌。"""
     payload = request("/api/playlist/detail", {"id": int(playlist_id)}, cookie=cookie)
     playlist = payload.get("result") or payload.get("playlist") or {}
-    return [_song(item) for item in playlist.get("tracks") or []]
+    privileges = {item.get("id"): item for item in playlist.get("privileges") or payload.get("privileges") or []}
+    songs = []
+    for item in playlist.get("tracks") or []:
+        song = _song(item)
+        _apply_privilege(song, privileges.get(item.get("id")))
+        songs.append(song)
+    return songs
 
 
 def song_qualities(song_id, cookie="", known=None):
@@ -594,7 +607,7 @@ def add_comment(song_id, content, cookie):
 
 def personal_fm(cookie):
     payload = request("/api/v1/radio/get", cookie=cookie)
-    return [_song(item) for item in payload.get("data") or []]
+    return _mark_playable([_song(item) for item in payload.get("data") or []], cookie)
 
 
 def fm_trash(song_id, cookie):
@@ -763,7 +776,12 @@ def liked_songs(cookie):
     for start in range(0, len(song_ids), 100):
         chunk = song_ids[start:start + 100]
         detail = request("/api/song/detail", {"ids": json.dumps(chunk)}, cookie=cookie)
-        by_id = {item.get("id"): _song(item) for item in detail.get("songs") or []}
+        privileges = {item.get("id"): item for item in detail.get("privileges") or []}
+        by_id = {}
+        for item in detail.get("songs") or []:
+            song = _song(item)
+            _apply_privilege(song, privileges.get(item.get("id")))
+            by_id[item.get("id")] = song
         songs.extend(by_id[sid] for sid in chunk if sid in by_id)
     return songs
 
@@ -820,7 +838,7 @@ def artist_songs(artist_id, cookie="", limit=50):
     if not songs:
         legacy = request("/api/artist/top/song", {"id": int(artist_id)}, cookie=cookie)
         songs = legacy.get("songs") or []
-    return [_song(item) for item in songs]
+    return _mark_playable([_song(item) for item in songs], cookie)
 
 
 def artist_albums(artist_id, cookie="", limit=12):
@@ -843,7 +861,7 @@ def artist_albums(artist_id, cookie="", limit=12):
 def album_detail(album_id, cookie=""):
     payload = request("/api/v1/album/" + str(int(album_id)), cookie=cookie, method="GET")
     album = payload.get("album") or {}
-    songs = [_song(item) for item in payload.get("songs") or []]
+    songs = _mark_playable([_song(item) for item in payload.get("songs") or []], cookie)
     artist = (album.get("artist") or (album.get("artists") or [None])[0] or {})
     return {
         "id": album.get("id") or album_id,
@@ -860,7 +878,7 @@ def album_detail(album_id, cookie=""):
 def recommend_songs(cookie):
     payload = request("/api/v1/discovery/recommend/songs", cookie=cookie, method="POST", data={})
     daily = ((payload.get("data") or {}).get("dailySongs") or [])
-    return [_song(item) for item in daily]
+    return _mark_playable([_song(item) for item in daily], cookie)
 
 
 def _artist_rows(item):
@@ -879,14 +897,29 @@ def _album(item):
 
 def attach_covers(songs, cookie=""):
     """按歌曲详情补齐专辑图。旧的 /api/song/detail 不再返回封面，不能拿来覆盖已有地址。"""
-    missing = [song for song in songs if song.get("id") and not song.get("cover")]
+    return _complete_songs(songs, cookie)
+
+
+def _complete_songs(songs, cookie=""):
+    """一次详情请求补封面和播放权限。搜索原来这两步各打一遍同一接口。"""
+    missing = [
+        song for song in songs
+        if song.get("id") and (not song.get("cover") or song.get("playable") is None)
+    ]
     for start in range(0, len(missing), 100):
         chunk = missing[start:start + 100]
         body = json.dumps([{"id": int(song["id"])} for song in chunk])
-        detail = request("/api/v3/song/detail", {"c": body}, cookie=cookie)
-        by_id = {item.get("id"): _pic(item) for item in detail.get("songs") or []}
+        try:
+            detail = request("/api/v3/song/detail", {"c": body}, cookie=cookie)
+        except ApiError:
+            continue
+        covers = {item.get("id"): _pic(item) for item in detail.get("songs") or []}
+        privileges = {item.get("id"): item for item in detail.get("privileges") or []}
         for song in chunk:
-            song["cover"] = by_id.get(song["id"]) or song.get("cover") or ""
+            if not song.get("cover"):
+                song["cover"] = covers.get(song["id"]) or ""
+            if song.get("playable") is None:
+                _apply_privilege(song, privileges.get(song["id"]))
     return songs
 
 
@@ -912,6 +945,20 @@ def _pic(item):
     )
 
 
+def _mark_playable(songs, cookie=""):
+    """专辑、电台这些接口不带 privileges。按歌曲详情补上能不能播。"""
+    return _complete_songs(songs, cookie)
+
+
+def _apply_privilege(song, privilege):
+    """无版权、下架、不能试听的歌标记为不可播放。没有权限数据时不当成不能播。"""
+    if not privilege:
+        return song
+    st = int(privilege.get("st") or 0)
+    song["playable"] = st >= 0 and int(privilege.get("pl") or 0) > 0
+    return song
+
+
 def _song(item, added=0):
     album = item.get("al") or item.get("album") or {}
     artists = _artist_rows(item)
@@ -927,6 +974,7 @@ def _song(item, added=0):
         "duration": item.get("dt") or item.get("duration") or 0,
         "fee": item.get("fee") or 0,
         "added": added or 0,
+        "playable": None,
     }
 
 

@@ -60,6 +60,15 @@ class DictListModel(QAbstractListModel):
         self.endInsertRows()
         self.rowsChanged.emit()
 
+    def remove_at(self, row):
+        """删一行，不重置整个模型，列表滚动位置才留得住。"""
+        if not (0 <= row < len(self._rows)):
+            return
+        self.beginRemoveRows(QModelIndex(), row, row)
+        del self._rows[row]
+        self.endRemoveRows()
+        self.rowsChanged.emit()
+
     @pyqtSlot(int, result="QVariantMap")
     def get(self, row):
         if 0 <= row < len(self._rows):

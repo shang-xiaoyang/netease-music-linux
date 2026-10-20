@@ -32,7 +32,7 @@ sudo apt install python3 python3-pyqt5 python3-pyqt5.qtquick \
 dpkg-buildpackage -us -uc -b
 ```
 
-当前版本是 1.3.1。产物是 `Architecture: all` 的 deb。安装：
+当前版本是 1.3.2。产物是 `Architecture: all` 的 deb。安装：
 
 ```sh
 sudo apt install ./netease-music-linux_*_all.deb

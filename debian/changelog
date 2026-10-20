@@ -1,3 +1,14 @@
+netease-music-linux (1.3.2-1) unstable; urgency=medium
+
+  * Play a copied song when "play next" reaches it, and double-click the queue.
+  * Keep the playlist where it was after removing a song.
+  * Show elapsed and total time on the progress bar.
+  * Grey out songs without playback rights and skip them.
+  * Advance playback when the current queue song is removed.
+  * Cap a cached or downloaded track at 200 MB, and fetch cover plus rights once.
+
+ -- Shang Xiaoyang <shangxiaoyang@kylinos.cn>  Mon, 20 Oct 2026 18:30:00 +0800
+
 netease-music-linux (1.3.1-1) unstable; urgency=medium
 
   * Stop the start menu from launching a new process on every activation.

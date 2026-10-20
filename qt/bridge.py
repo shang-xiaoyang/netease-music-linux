@@ -64,8 +64,8 @@ class AppBridge(QObject):
         self.player.positionChanged.connect(self._on_position)
         self.player.errorChanged.connect(self.statusChanged)
         self.player.ended.connect(self._on_ended)
-        self.songs = DictListModel(("songId", "name", "artist", "artistId", "artists", "album", "albumId", "cover", "local", "duration", "vip"))
-        self.queue = DictListModel(("songId", "name", "artist", "cover", "duration"))
+        self.songs = DictListModel(("songId", "name", "artist", "artistId", "artists", "album", "albumId", "cover", "local", "duration", "vip", "playable"))
+        self.queue = DictListModel(("songId", "name", "artist", "cover", "duration", "playable"))
         self.nav = DictListModel(("key", "label", "kind", "section", "cover", "local"))
         self.cards = DictListModel(("itemId", "name", "cover", "local", "count", "kind"))
         self.collects = DictListModel(("itemId", "name", "cover", "local", "count", "kind"))
@@ -153,6 +153,8 @@ class AppBridge(QObject):
                 self._apply_cards(*payload)
             elif kind == "songs":
                 self._apply_songs(*payload[:7], refs=payload[7] if len(payload) > 7 else None)
+            elif kind == "dropSong":
+                self._drop_song_row(*payload)
             elif kind == "albums":
                 self._apply_albums(payload)
             elif kind == "detail":
@@ -420,11 +422,12 @@ class AppBridge(QObject):
         song = self._queue[row]
         if not song or not song.get("songId") or row == self._index + 1:
             return
+        if self._refuse_unplayable(song):
+            return
         self._queue.pop(row)
-        insert_at = min(len(self._queue), self._index + 1)
         if row < self._index:
             self._index -= 1
-            insert_at = min(len(self._queue), self._index + 1)
+        insert_at = min(len(self._queue), self._index + 1)
         self._queue.insert(insert_at, song)
         self.queue.replace(self._queue)
         self.statusChanged.emit(f"下一首播放 {song.get('name') or ''}")
@@ -468,8 +471,7 @@ class AppBridge(QObject):
             self._post("status", str(exc))
             return
         if str(self._list_id) == str(playlist_id) and 0 <= row < len(self.songs._rows):
-            rows = [item for index, item in enumerate(self.songs._rows) if index != row]
-            self._post_songs(rows, f"已从当前歌单移除 {song.get('name') or ''}", max(0, self._list_total - 1), self._list_title)
+            self._post("dropSong", (row, self._list_token, f"已从当前歌单移除 {song.get('name') or ''}"))
         else:
             self._post("status", f"已从当前歌单移除 {song.get('name') or ''}")
 
@@ -477,13 +479,22 @@ class AppBridge(QObject):
     def removeFromQueue(self, row):
         if not (0 <= row < len(self._queue)):
             return
+        was_current = row == self._index
         song = self._queue.pop(row)
         if row < self._index:
             self._index -= 1
-        elif row == self._index:
-            self._index = min(self._index, len(self._queue) - 1)
-        self.queue.replace(self._queue)
+        elif was_current:
+            self._index = min(row, len(self._queue) - 1)
+        self.queue.remove_at(row)
         self.statusChanged.emit(f"已从播放列表移除 {song.get('name') or ''}")
+        if was_current:
+            if self._queue:
+                self._play_index(self._index)
+            else:
+                self._index = -1
+                self._song = None
+                self.player.stop()
+                self.currentSongChanged.emit("")
 
     @staticmethod
     def _playlist_nav(items):
@@ -776,6 +787,15 @@ class AppBridge(QObject):
             self.songs.replace(rows)
         self.statusChanged.emit(status)
 
+    def _drop_song_row(self, row, token, status):
+        """只删这一行。整表替换会把列表滚回第一行。"""
+        if token != self._list_token or not (0 <= row < len(self.songs._rows)):
+            return
+        self.songs.remove_at(row)
+        self._list_total = max(0, self._list_total - 1)
+        self._list_offset = max(0, self._list_offset - 1)
+        self.statusChanged.emit(status)
+
     def _cache_song_covers(self, rows):
         self._queue_covers((row.get("cover") for row in rows), 36, "songrow")
 
@@ -953,6 +973,7 @@ class AppBridge(QObject):
             "local": "",
             "duration": 0,
             "vip": False,
+            "playable": True,
         }
         self._suggest_play = song_id
         self.search(name or song_id)
@@ -1147,6 +1168,7 @@ class AppBridge(QObject):
                 "local": "",
                 "duration": int(song.get("duration") or 0),
                 "vip": int(song.get("fee") or 0) == 1,
+                "playable": song.get("playable") is not False,
             })
         return rows
 
@@ -1163,20 +1185,39 @@ class AppBridge(QObject):
             if isinstance(item, dict) and item.get("name")
         )
 
+    def _refuse_unplayable(self, song):
+        if song and song.get("playable") is False:
+            self.statusChanged.emit(f"暂时没有版权：{song.get('name') or ''}")
+            return True
+        return False
+
     @pyqtSlot(int)
     def playRow(self, row):
         song = self.songs.get(row)
         if not song or not song.get("songId"):
             return
-        self._queue = [dict(item) for item in self.songs._rows if item.get("songId")]
+        if self._refuse_unplayable(song):
+            return
+        self._queue = [
+            dict(item) for item in self.songs._rows
+            if item.get("songId") and item.get("playable") is not False
+        ]
         self._queue_source = self._list_id
         self._queue_title = self._page_title or "当前播放"
         self.queue.replace(self._queue)
         index = next((i for i, item in enumerate(self._queue) if item.get("songId") == song.get("songId")), 0)
         self._play_index(index)
 
+    @pyqtSlot(result=int)
+    def queueIndex(self):
+        return self._index
+
     @pyqtSlot(int)
     def playQueue(self, row):
+        if not (0 <= row < len(self._queue)):
+            return
+        if self._refuse_unplayable(self._queue[row]):
+            return
         self._play_index(row)
 
     def _play_index(self, index):
@@ -1285,13 +1326,17 @@ class AppBridge(QObject):
         song = self.songs.get(row)
         if not song or not song.get("songId"):
             return
+        if self._refuse_unplayable(song):
+            return
+        # 歌单行和播放队列必须各持一份。共用同一份时，稍后刷新歌单会把队列里的歌改掉。
+        song = dict(song)
         if not self._queue:
             self._queue = [song]
             self._index = 0
             self.queue.replace(self._queue)
             self._play_index(0)
             return
-        insert_at = min(len(self._queue), self._index + 1)
+        insert_at = min(len(self._queue), max(0, self._index) + 1)
         self._queue.insert(insert_at, song)
         self.queue.replace(self._queue)
         self.statusChanged.emit(f"下一首播放 {song.get('name') or ''}")
@@ -1318,8 +1363,6 @@ class AppBridge(QObject):
         else:
             self._liked.discard(str(song["songId"]))
         self.statusChanged.emit(("已加入我喜欢" if like else "已取消喜欢") + f"：{song.get('name') or ''}")
-        if self._song and str(self._song.get("songId")) == str(song["songId"]):
-            self.likedChanged.emit(like)
         if self._song and str(self._song.get("songId")) == str(song["songId"]):
             self.likedChanged.emit(like)
 
@@ -1358,18 +1401,32 @@ class AppBridge(QObject):
         if not self._queue:
             return
         if self._mode == "shuffle":
-            choices = [i for i in range(len(self._queue)) if i != self._index]
-            index = random.choice(choices) if choices else 0
+            choices = [
+                i for i in range(len(self._queue))
+                if i != self._index and self._queue[i].get("playable") is not False
+            ]
+            if not choices:
+                self.statusChanged.emit("没有可播放的下一首")
+                return
+            index = random.choice(choices)
         elif self._mode == "single" and step > 0:
             index = self._index
         else:
             index = self._index + step
-            if not (0 <= index < len(self._queue)):
-                if self._mode == "order":
-                    self._post("stop", None)
-                    self.statusChanged.emit("列表播放结束")
-                    return
-                index %= len(self._queue)
+            limit = len(self._queue)
+            for _ in range(limit):
+                if 0 <= index < limit and self._queue[index].get("playable") is not False:
+                    break
+                index += 1 if step >= 0 else -1
+                if not (0 <= index < limit):
+                    if self._mode == "order":
+                        self._post("stop", None)
+                        self.statusChanged.emit("列表播放结束")
+                        return
+                    index %= limit
+            else:
+                self.statusChanged.emit("没有可播放的下一首")
+                return
         self._play_index(index)
 
     @pyqtSlot(int)
@@ -1926,6 +1983,8 @@ class AppBridge(QObject):
         if not song or not song.get("songId"):
             self.statusChanged.emit("没有可下载的歌曲")
             return
+        if self._refuse_unplayable(song):
+            return
         item = {
             "name": song.get("name") or "",
             "status": "等待",
@@ -1978,13 +2037,25 @@ class AppBridge(QObject):
         if os.path.commonpath((os.path.abspath(music), os.path.abspath(dest))) != os.path.abspath(music):
             raise OSError("下载文件名无效")
         req = urllib.request.Request(info["url"], headers={"User-Agent": api.UA, "Referer": "https://music.163.com/"})
-        with urllib.request.urlopen(req, timeout=60) as resp, open(dest + ".part", "wb") as handle:
-            while True:
-                chunk = resp.read(65536)
-                if not chunk:
-                    break
-                handle.write(chunk)
-        os.replace(dest + ".part", dest)
+        part = dest + ".part"
+        written = 0
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp, open(part, "wb") as handle:
+                while True:
+                    chunk = resp.read(65536)
+                    if not chunk:
+                        break
+                    written += len(chunk)
+                    if written > 200 * 1024 * 1024:
+                        raise OSError("下载文件过大")
+                    handle.write(chunk)
+        except Exception:
+            try:
+                os.remove(part)
+            except OSError:
+                pass
+            raise
+        os.replace(part, dest)
         return dest, info.get("level") or level
 
     def _save_state(self):

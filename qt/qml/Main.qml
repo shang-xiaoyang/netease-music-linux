@@ -932,12 +932,20 @@ ApplicationWindow {
                 }
                 Menu {
                     id: songMenu
-                    MenuItem { text: "⏭  下一首播放"; onTriggered: appBridge.playNext(songMenuState.row) }
+                    MenuItem {
+                        text: "⏭  下一首播放"
+                        enabled: (songList.get(songMenuState.row) || {}).playable !== false
+                        onTriggered: appBridge.playNext(songMenuState.row)
+                    }
                     MenuItem {
                         text: (appBridge.songLiked((songList.get(songMenuState.row) || {}).songId) ? "♥  取消喜欢" : "♡  加入喜欢")
                         onTriggered: appBridge.toggleLike(songMenuState.row)
                     }
-                    MenuItem { text: "↓  下载"; onTriggered: appBridge.enqueueDownload(songMenuState.row) }
+                    MenuItem {
+                        text: "↓  下载"
+                        enabled: (songList.get(songMenuState.row) || {}).playable !== false
+                        onTriggered: appBridge.enqueueDownload(songMenuState.row)
+                    }
                     MenuItem { text: "✎  查看评论"; onTriggered: appBridge.openComments(songMenuState.row) }
                     MenuItem {
                         id: removeTrackItem
@@ -1005,7 +1013,8 @@ ApplicationWindow {
                     delegate: ItemDelegate {
                         width: songView.width
                         height: 56
-                        onDoubleClicked: appBridge.playRow(index)
+                        opacity: model.playable === false ? 0.38 : 1
+                        onDoubleClicked: if (model.playable !== false) appBridge.playRow(index)
                         onPressAndHold: songView.openRowMenu(index)
                         background: Rectangle {
                             color: model.songId === window.currentSongId ? "#FDECEC" : (parent.hovered && !songView.moving ? "#E8F3FF" : "transparent")
@@ -1164,7 +1173,8 @@ ApplicationWindow {
                         delegate: ItemDelegate {
                             width: detailSongs.width
                             height: 48
-                            onDoubleClicked: appBridge.playRow(index)
+                            opacity: model.playable === false ? 0.38 : 1
+                            onDoubleClicked: if (model.playable !== false) appBridge.playRow(index)
                             onPressAndHold: detailSongs.openRowMenu(index)
                             MouseArea {
                                 anchors.fill: parent
@@ -1335,7 +1345,8 @@ ApplicationWindow {
                         delegate: ItemDelegate {
                             width: artistSongs.width
                             height: 48
-                            onDoubleClicked: appBridge.playRow(index)
+                            opacity: model.playable === false ? 0.38 : 1
+                            onDoubleClicked: if (model.playable !== false) appBridge.playRow(index)
                             onPressAndHold: artistSongs.openRowMenu(index)
                             MouseArea {
                                 anchors.fill: parent
@@ -1815,7 +1826,11 @@ ApplicationWindow {
             }
             Menu {
                 id: queueMenu
-                MenuItem { text: "⏭  下一首播放"; onTriggered: appBridge.playNextQueue(queueView.menuRow) }
+                MenuItem {
+                    text: "⏭  下一首播放"
+                    enabled: (queueList.get(queueView.menuRow) || {}).playable !== false
+                    onTriggered: appBridge.playNextQueue(queueView.menuRow)
+                }
                 MenuItem {
                     text: (appBridge.songLiked((queueList.get(queueView.menuRow) || {}).songId) ? "♥  取消喜欢" : "♡  加入喜欢")
                     onTriggered: appBridge.toggleQueueLike(queueView.menuRow)
@@ -1835,20 +1850,34 @@ ApplicationWindow {
                         onObjectRemoved: queueCollect.removeItem(object)
                     }
                 }
-                MenuItem { text: "✕  从播放列表移除"; onTriggered: appBridge.removeFromQueue(queueView.menuRow) }
+                MenuItem {
+                    text: "✕  从播放列表移除"
+                    onTriggered: {
+                        queueView.removingRow = true
+                        appBridge.removeFromQueue(queueView.menuRow)
+                        queueView.removingRow = false
+                    }
+                }
             }
             property int playingRow: {
                 var playing = window.currentSongId
                 var rows = count
                 if (!playing || rows < 1)
                     return -1
+                var found = -1
                 for (var i = 0; i < rows; i++) {
-                    if (String((queueList.get(i) || {}).songId || "") === playing)
+                    if (String((queueList.get(i) || {}).songId || "") !== playing)
+                        continue
+                    if (found < 0)
+                        found = i
+                    // 同一首歌可能被插成「下一首」。当前正在播的那一行优先。
+                    if (i === appBridge.queueIndex())
                         return i
                 }
-                return -1
+                return found
             }
-            onPlayingRowChanged: Qt.callLater(centerCurrent)
+            onPlayingRowChanged: if (!removingRow) Qt.callLater(centerCurrent)
+            property bool removingRow: false
             function centerCurrent() {
                 var row = playingRow
                 if (!queuePopup.visible || row < 0 || count < 1)
@@ -1868,6 +1897,7 @@ ApplicationWindow {
             delegate: Item {
                 width: 312
                 height: 32
+                opacity: model.playable === false ? 0.38 : 1
                 Rectangle {
                     anchors.fill: parent
                     color: model.songId === window.currentSongId ? "#FDECEC" : (hover.containsMouse && !queueView.moving ? "#F6F6F8" : "transparent")
@@ -1907,12 +1937,14 @@ ApplicationWindow {
                     hoverEnabled: true
                     acceptedButtons: Qt.LeftButton | Qt.RightButton
                     onClicked: {
-                        if (mouse.button !== Qt.RightButton) {
-                            appBridge.playQueue(index)
-                            return
+                        if (mouse.button === Qt.RightButton) {
+                            appBridge.openCollect()
+                            queueView.openRowMenu(index)
                         }
-                        appBridge.openCollect()
-                        queueView.openRowMenu(index)
+                    }
+                    onDoubleClicked: {
+                        if (mouse.button === Qt.LeftButton && model.playable !== false)
+                            appBridge.playQueue(index)
                     }
                     onPressAndHold: {
                         appBridge.openCollect()
