@@ -31,11 +31,13 @@ ApplicationWindow {
     }
 
     property bool searching: search.activeFocus
-    property var searchItem: search
+    property var searchItem: searchBox
+    property bool suggestPressed: false
     property bool blurSearch: false
     onBlurSearchChanged: if (blurSearch) { blurSearch = false; leaveSearch() }
     property bool searchWanted: false
     property string suggestText: ""
+    property string searchHistory: ""
     property bool escapeWanted: false
     onSearchWantedChanged: if (searchWanted) { search.forceActiveFocus(); searchWanted = false }
     onEscapeWantedChanged: if (escapeWanted) { escapeWanted = false; handleEscape() }
@@ -140,6 +142,7 @@ ApplicationWindow {
             window.detailCover = ""
         }
         function onLyricChanged(text) { window.lyricText = text }
+        function onHistoryChanged(text) { window.searchHistory = text || "" }
         function onLoginKeyChanged(key) { window.loginKey = key }
         function onQualitiesChanged(text) { qualityMenu.model = text }
         function onLikedChanged(value) { window.liked = value }
@@ -160,7 +163,7 @@ ApplicationWindow {
         height: 52
         color: "#FFFFFF"
         radius: window.visibility === 4 ? 0 : 12
-        z: 2
+        z: 50
         Rectangle {
             anchors.left: parent.left
             anchors.right: parent.right
@@ -169,6 +172,7 @@ ApplicationWindow {
             color: "#E6E6E8"
         }
         RowLayout {
+            id: searchRow
             anchors.fill: parent
             anchors.leftMargin: 16
             anchors.rightMargin: 8
@@ -218,31 +222,48 @@ ApplicationWindow {
                         height: 32
                         placeholderText: "搜索歌曲、歌手、歌单"
                         selectByMouse: true
+                        // 标题栏有一层用来拖动窗口的 MouseArea。按下时自己取得焦点，点击才进得了输入框。
+                        activeFocusOnPress: true
                         background: Item {}
                         leftPadding: 0
                         rightPadding: 0
                         property int suggestToken: 0
-                        onTextChanged: {
+                        onTextChanged: queueSuggest()
+                        onActiveFocusChanged: if (activeFocus) queueSuggest()
+                        function queueSuggest() {
                             suggestToken = suggestToken + 1
-                            var token = suggestToken
                             var typed = text
                             if (typed.trim() === "") {
                                 window.suggestText = ""
                                 return
                             }
-                            suggestTimer.token = token
+                            suggestTimer.token = suggestToken
                             suggestTimer.typed = typed
                             suggestTimer.restart()
                         }
                         onAccepted: {
                             suggestTimer.stop()
                             window.suggestText = ""
+                            window.searchHistory = prependHistory(window.searchHistory, text)
                             appBridge.search(text)
                             leaveSearch()
+                        }
+                        function prependHistory(current, keyword) {
+                            var text = keyword.trim()
+                            if (text === "")
+                                return current
+                            var rows = current === "" ? [] : current.split("\n")
+                            var next = [text]
+                            for (var i = 0; i < rows.length && next.length < 10; i++) {
+                                if (rows[i] !== "" && rows[i] !== text)
+                                    next.push(rows[i])
+                            }
+                            return next.join("\n")
                         }
                         function openSuggestion(fields) {
                             suggestTimer.stop()
                             window.suggestText = ""
+                            window.searchHistory = prependHistory(window.searchHistory, fields[1] || text)
                             appBridge.playSuggestion(fields[0] || "", fields[1] || text, fields[2] || "")
                             leaveSearch()
                         }
@@ -258,76 +279,6 @@ ApplicationWindow {
                                     return
                                 appBridge.suggest(typed)
                             }
-                        }
-                    }
-                }
-                Popup {
-                    id: suggestPopup
-                    parent: window.contentItem
-                    x: searchBox.mapToItem(window.contentItem, 0, 0).x
-                    y: searchBox.mapToItem(window.contentItem, 0, searchBox.height).y
-                    width: searchBox.width
-                    height: Math.min(8, suggestView.count) * 36 + 36
-                    visible: search.activeFocus && window.suggestText !== ""
-                    modal: false
-                    closePolicy: Popup.CloseOnPressOutside | Popup.CloseOnEscape
-                    padding: 0
-                    z: 20
-                    background: Rectangle { color: "#FFFFFF"; radius: 8; border.color: "#E6E6E8" }
-                    ListView {
-                        id: suggestView
-                        anchors.fill: parent
-                        anchors.margins: 4
-                        clip: true
-                        model: window.suggestText === "" ? [] : window.suggestText.split("\n")
-                        keyNavigationWraps: false
-                        header: Item {
-                            width: suggestView.width
-                            height: 32
-                            Label {
-                                anchors.verticalCenter: parent.verticalCenter
-                                anchors.left: parent.left
-                                anchors.leftMargin: 12
-                                text: "搜索「" + search.text + "」"
-                                color: "#507DAF"
-                                font.pixelSize: 13
-                                elide: Text.ElideRight
-                                width: parent.width - 24
-                            }
-                            MouseArea {
-                                anchors.fill: parent
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: search.accepted()
-                            }
-                        }
-                        delegate: Item {
-                            width: suggestView.width
-                            height: 36
-                            property var fields: String(modelData).split("\t")
-                            Rectangle {
-                                anchors.fill: parent
-                                radius: 6
-                                color: suggestHover.containsMouse || (suggestView.activeFocus && index === suggestView.currentIndex) ? "#F4F4F6" : "transparent"
-                            }
-                            Label {
-                                anchors.verticalCenter: parent.verticalCenter
-                                anchors.left: parent.left
-                                anchors.leftMargin: 12
-                                width: parent.width - 24
-                                text: (fields[1] || "") + (fields[2] ? "  ·  " + fields[2] : "")
-                                color: "#333333"
-                                font.pixelSize: 13
-                                elide: Text.ElideRight
-                            }
-                            MouseArea {
-                                id: suggestHover
-                                anchors.fill: parent
-                                hoverEnabled: true
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: search.openSuggestion(fields)
-                            }
-                            Keys.onReturnPressed: search.openSuggestion(fields)
-                            Keys.onEnterPressed: search.openSuggestion(fields)
                         }
                     }
                 }
@@ -401,6 +352,7 @@ ApplicationWindow {
         }
         MouseArea {
             anchors.fill: parent
+            z: -1
             acceptedButtons: Qt.LeftButton
             propagateComposedEvents: true
             onDoubleClicked: window.visibility === 4 ? window.showNormal() : window.showMaximized()
@@ -409,7 +361,10 @@ ApplicationWindow {
                 var accountPoint = account.mapFromItem(titleBar, mouse.x, mouse.y)
                 var onSearch = searchPoint.x >= 0 && searchPoint.x <= searchBox.width && searchPoint.y >= 0 && searchPoint.y <= searchBox.height
                 var onAccount = accountPoint.x >= 0 && accountPoint.x <= account.width && accountPoint.y >= 0 && accountPoint.y <= account.height
-                if (onSearch || onAccount)
+                // 下拉层画在标题栏下面，但父级是窗口。点在层上时不要当成拖窗口。
+                var popPoint = suggestPopup.mapFromItem(titleBar, mouse.x, mouse.y)
+                var onPopup = suggestPopup.visible && popPoint.x >= 0 && popPoint.x <= suggestPopup.width && popPoint.y >= 0 && popPoint.y <= suggestPopup.height
+                if (onSearch || onAccount || onPopup)
                     mouse.accepted = false
                 else {
                     leaveSearch()
@@ -424,6 +379,16 @@ ApplicationWindow {
         anchors.bottom: playColumn.top
         anchors.left: parent.left
         anchors.right: parent.right
+
+        MouseArea {
+            anchors.fill: parent
+            z: -1
+            onPressed: function(mouse) {
+                if (suggestPopup.visible || search.activeFocus)
+                    leaveSearch()
+                mouse.accepted = false
+            }
+        }
 
         Rectangle {
             id: sideBar
@@ -2528,6 +2493,158 @@ ApplicationWindow {
             }
         }
     }
+
+    // 不用 Popup。无边框窗口里它的坐标会偏到左侧，点击也会漏到下面的页面。
+    // mapToItem 不会跟着布局更新，第一次算出的 x 会停在 0。直接加标题行和搜索框的 x。
+    // 放在窗口内容的最后，盖住标题栏和页面，点击才不会穿到下面的歌单。
+    Item {
+        id: suggestPopup
+        parent: window.contentItem
+        z: 200
+        x: searchRow.x + searchBox.x
+        y: searchRow.y + searchBox.y + searchBox.height + 4
+        width: Math.max(searchBox.width, 280)
+        height: search.text.trim() === ""
+            ? (historyView.count > 0 ? historyView.count * 32 + 40 : 0)
+            : Math.min(8, suggestView.count) * 36 + 36
+        visible: search.activeFocus && (
+            (search.text.trim() !== "" && window.suggestText !== "")
+            || (search.text.trim() === "" && historyView.count > 0)
+        )
+        Rectangle {
+            anchors.fill: parent
+            radius: 8
+            color: "#FFFFFF"
+            border.color: "#E6E6E8"
+        }
+        MouseArea {
+            anchors.fill: parent
+            z: -1
+            hoverEnabled: true
+            acceptedButtons: Qt.LeftButton | Qt.RightButton | Qt.MiddleButton
+            onPressed: mouse.accepted = true
+        }
+        ListView {
+            id: historyView
+            anchors.fill: parent
+            anchors.margins: 4
+            visible: search.text.trim() === ""
+            clip: true
+            model: window.searchHistory === "" ? [] : window.searchHistory.split("\n")
+            header: Item {
+                width: historyView.width
+                height: 32
+                Label {
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.left: parent.left
+                    anchors.leftMargin: 12
+                    text: "搜索历史"
+                    color: "#8E8E93"
+                    font.pixelSize: 12
+                }
+                Label {
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.right: parent.right
+                    anchors.rightMargin: 12
+                    text: "清空"
+                    color: "#507DAF"
+                    font.pixelSize: 12
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: appBridge.clearSearchHistory()
+                    }
+                }
+            }
+            delegate: Item {
+                width: historyView.width
+                height: 32
+                Rectangle {
+                    anchors.fill: parent
+                    radius: 6
+                    color: historyHover.containsMouse ? "#F4F4F6" : "transparent"
+                }
+                Label {
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.left: parent.left
+                    anchors.leftMargin: 12
+                    width: parent.width - 24
+                    text: modelData
+                    color: "#333333"
+                    font.pixelSize: 13
+                    elide: Text.ElideRight
+                }
+                MouseArea {
+                    id: historyHover
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: {
+                        search.text = modelData
+                        search.accepted()
+                    }
+                }
+            }
+        }
+        ListView {
+            id: suggestView
+            anchors.fill: parent
+            anchors.margins: 4
+            visible: search.text.trim() !== ""
+            clip: true
+            model: window.suggestText === "" ? [] : window.suggestText.split("\n")
+            keyNavigationWraps: false
+            header: Item {
+                width: suggestView.width
+                height: 32
+                Label {
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.left: parent.left
+                    anchors.leftMargin: 12
+                    text: "搜索「" + search.text + "」"
+                    color: "#507DAF"
+                    font.pixelSize: 13
+                    elide: Text.ElideRight
+                    width: parent.width - 24
+                }
+                MouseArea {
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: search.accepted()
+                }
+            }
+            delegate: Item {
+                width: suggestView.width
+                height: 36
+                property var fields: String(modelData).split("\t")
+                Rectangle {
+                    anchors.fill: parent
+                    radius: 6
+                    color: suggestHover.containsMouse || (suggestView.activeFocus && index === suggestView.currentIndex) ? "#F4F4F6" : "transparent"
+                }
+                Label {
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.left: parent.left
+                    anchors.leftMargin: 12
+                    width: parent.width - 24
+                    text: (fields[1] || "") + (fields[2] ? "  ·  " + fields[2] : "")
+                    color: "#333333"
+                    font.pixelSize: 13
+                    elide: Text.ElideRight
+                }
+                MouseArea {
+                    id: suggestHover
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: search.openSuggestion(fields)
+                }
+                Keys.onReturnPressed: search.openSuggestion(fields)
+                Keys.onEnterPressed: search.openSuggestion(fields)
+            }
+        }
+    }
+
     QtObject {
         id: qualityMenu
         property string model: ""

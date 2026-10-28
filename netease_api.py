@@ -429,7 +429,7 @@ def lyric_payload(song_id, cookie=""):
                 "tv": 0,
                 "rv": 0,
                 "kv": 0,
-                "yv": 0,
+                "yv": 1,
                 "ytv": 0,
                 "yrv": 0,
             },

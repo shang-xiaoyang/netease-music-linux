@@ -63,6 +63,7 @@ class PlayerBackend(QObject):
         self._rate = 1.0
         self._clock = None
         self._held_pause = False
+        self._paused_at = 0.0
         self._lock = threading.Lock()
         bus = self.playbin.get_bus()
         bus.add_signal_watch()
@@ -83,6 +84,8 @@ class PlayerBackend(QObject):
         keep = max(0, int(keep or 0))
         with self._lock:
             self._want = "playing"
+            self._held_pause = False
+            self._paused_at = 0.0
             self._position = keep
             self._duration = 0
             self._anchor = keep
@@ -109,6 +112,8 @@ class PlayerBackend(QObject):
             # 管道还没出声。锚点留空，进度停在上次位置，等真正开始再走。
             self._started_at = 0
             self._want = "playing"
+            self._held_pause = False
+            self._paused_at = 0.0
             if not keep:
                 self._seek_target = None
         self.playbin.set_property("uri", url)
@@ -134,6 +139,7 @@ class PlayerBackend(QObject):
         with self._lock:
             self._want = "paused"
             self._held_pause = True
+            self._paused_at = time.time()
             self._position = held
             self._anchor = held
             self._started_at = 0
@@ -142,12 +148,24 @@ class PlayerBackend(QObject):
 
     @pyqtSlot()
     def has_source(self):
-        if self._uri:
-            return True
+        with self._lock:
+            if not self._uri:
+                return False
+            # 暂停超过 20 分钟，流地址多半已经被服务器掐掉。当作没有源，让调用方重开这首。
+            paused_at = self._paused_at
+        return not paused_at or time.time() - paused_at <= 20 * 60
+
+    def drop_source(self):
+        """旧流已经不能续播。进度留下，地址清掉，避免失败被当成唱完。"""
+        with self._lock:
+            self._uri = ""
+            self._held_pause = False
+            self._paused_at = 0.0
+            self._started_at = 0
         try:
-            return bool(self.playbin.get_property("uri"))
+            self.playbin.set_state(Gst.State.NULL)
         except Exception:
-            return False
+            pass
 
     def resume(self):
         if not self.has_source():
@@ -156,6 +174,7 @@ class PlayerBackend(QObject):
             held = self._position
             self._want = "playing"
             self._held_pause = False
+            self._paused_at = 0.0
             self._anchor = held
             # 续播定位还没落地。先不走进度，等定位到达再开始。
             self._started_at = 0
@@ -181,6 +200,7 @@ class PlayerBackend(QObject):
         with self._lock:
             self._want = "stopped"
             self._held_pause = False
+            self._paused_at = 0.0
             self._started_at = 0
         self.playbin.set_state(Gst.State.NULL)
         self._uri = ""
@@ -228,6 +248,7 @@ class PlayerBackend(QObject):
                     # 暂停太久时连接会被掐断。这不是唱完，进度留在暂停处，下次重开这首。
                     self._want = "paused"
                     self._held_pause = True
+                    self._paused_at = time.time()
                     self._started_at = 0
                     self._uri = ""
                     self._position = kept
@@ -247,6 +268,7 @@ class PlayerBackend(QObject):
                 held = self._held_pause
                 if held:
                     self._want = "paused"
+                    self._paused_at = time.time()
                     self._started_at = 0
                     self._uri = ""
                 else:

@@ -21,7 +21,7 @@ if ROOT not in sys.path:
 import netease_api as api
 
 from qt.models import DictListModel
-from qt.paths import COOKIE_PATH, DATA_DIR, DOWNLOAD_INDEX, LYRIC_PATH, LYRIC_STATE_PATH, LYRIC_TRACK_PATH, RECENT_PATH, STATE_PATH, VOLUME_PATH, player_script
+from qt.paths import COOKIE_PATH, DATA_DIR, DOWNLOAD_INDEX, LYRIC_PATH, LYRIC_STATE_PATH, LYRIC_TRACK_PATH, RECENT_PATH, SEARCH_HISTORY_PATH, STATE_PATH, VOLUME_PATH, player_script
 from qt.playback_cache import lookup as cache_lookup
 from qt.playback_cache import store as cache_store
 from qt.player_backend import PlayerBackend, allowed_uri
@@ -48,6 +48,7 @@ class AppBridge(QObject):
     volumeChanged = pyqtSignal(float)
     rateChanged = pyqtSignal(float)
     coverChanged = pyqtSignal(str)
+    historyChanged = pyqtSignal(str)
     likedChanged = pyqtSignal(bool)
     lyricChanged = pyqtSignal(str)
     deskLyricChanged = pyqtSignal(bool)
@@ -127,6 +128,7 @@ class AppBridge(QObject):
         self._lyric_sync_at = 0.0
         self._uiReady.connect(self._drain_ui, Qt.QueuedConnection)
         self._fill_nav()
+        self.historyChanged.emit("\n".join(self._load_search_history()))
         self.accountChanged.emit("登录")
         self.qualityChanged.emit(api.QUALITY_LABEL.get(self._quality, self._quality))
         threading.Thread(target=self._boot, daemon=True).start()
@@ -192,6 +194,8 @@ class AppBridge(QObject):
                 self.qualitiesChanged.emit(payload)
             elif kind == "lyric":
                 self.lyricChanged.emit(payload)
+            elif kind == "history":
+                self.historyChanged.emit(payload or "")
             elif kind == "play":
                 self.player.play(payload)
             elif kind == "pause":
@@ -1041,13 +1045,58 @@ class AppBridge(QObject):
             "playable": True,
         }
         self._suggest_play = song_id
+        self._remember_search(name or song_id)
         self.search(name or song_id)
+
+    def _load_search_history(self):
+        try:
+            payload = json.loads(open(SEARCH_HISTORY_PATH, encoding="utf-8").read())
+        except (OSError, json.JSONDecodeError):
+            return []
+        rows = []
+        for item in payload if isinstance(payload, list) else []:
+            text = str(item or "").strip()
+            if text and text not in rows:
+                rows.append(text[:40])
+        return rows[:10]
+
+    def _remember_search(self, keyword):
+        text = (keyword or "").strip()[:40]
+        if not text:
+            return
+        rows = [item for item in self._load_search_history() if item != text]
+        rows.insert(0, text)
+        rows = rows[:10]
+        try:
+            os.makedirs(DATA_DIR, exist_ok=True)
+            os.chmod(DATA_DIR, 0o700)
+            tmp = SEARCH_HISTORY_PATH + ".tmp"
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(rows, handle, ensure_ascii=False)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, SEARCH_HISTORY_PATH)
+            os.chmod(SEARCH_HISTORY_PATH, 0o600)
+        except OSError:
+            return
+        self._post("history", "\n".join(rows))
+
+    @pyqtSlot()
+    def clearSearchHistory(self):
+        try:
+            os.remove(SEARCH_HISTORY_PATH)
+        except OSError:
+            pass
+        self.historyChanged.emit("")
 
     @pyqtSlot(str)
     def search(self, keyword):
         text = (keyword or "").strip()
         if not text:
             return
+        self._remember_search(text)
         self._show("list", f"搜索「{text}」")
         token = self._begin_list()
         self._search_keyword = text
@@ -1355,6 +1404,7 @@ class AppBridge(QObject):
         self._lyric_words = []
         self.lyricChanged.emit("")
         self._publish_desk_lyric(kept, song.get("name") or "歌词加载中…")
+        self._show_cover(song)
         cached = cache_lookup(song["songId"], self._quality)
         if cached:
             self.statusChanged.emit("正在打开本机缓存")
@@ -1415,8 +1465,6 @@ class AppBridge(QObject):
                 daemon=True,
             ).start()
         self._apply_volume()
-        if song.get("cover"):
-            threading.Thread(target=self._cache_cover, args=(song["cover"], 240), daemon=True).start()
         level = info.get("level") or self._quality
         self.qualityChanged.emit(api.QUALITY_LABEL.get(level, level))
         lines = api.merge_lrc(original, translated)
@@ -1663,7 +1711,8 @@ class AppBridge(QObject):
                 self.statusChanged.emit("继续播放")
                 return
         if self._song:
-            # 源已经失效时，从记下的进度重开这首，不要当成唱完切下一首。
+            # 暂停太久后流地址会失效。丢掉旧源，从记下的进度重开这首。
+            self.player.drop_source()
             self._resume_at = self.player.position()[0]
             self._play_index(self._index)
 
@@ -1761,6 +1810,14 @@ class AppBridge(QObject):
         self._play_index(self._index)
         if position > 1500:
             threading.Timer(0.8, lambda: self._post("seek", position)).start()
+
+    def _show_cover(self, song):
+        """切歌就换封面。本机缓存开播不再请求播放地址，封面不能等那一步。"""
+        url = (song or {}).get("cover") or ""
+        if not url:
+            self.coverChanged.emit("")
+            return
+        threading.Thread(target=self._cache_cover, args=(url, 240), daemon=True).start()
 
     def _cache_cover(self, url, size, kind="song", post=True):
         if not self._alive or not url:

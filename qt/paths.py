@@ -14,6 +14,7 @@ LYRIC_STATE_PATH = os.path.join(DATA_DIR, "desk-lyric-state.json")
 DOWNLOAD_INDEX = os.path.join(DATA_DIR, "qt-downloads.json")
 STATE_PATH = os.path.join(DATA_DIR, "state.json")
 RECENT_PATH = os.path.join(DATA_DIR, "recent-playlists.json")
+SEARCH_HISTORY_PATH = os.path.join(DATA_DIR, "qt-search-history.json")
 QML_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "qml")
 PLAYER_SCRIPT = os.environ.get("NETEASE_PLAYER_SCRIPT") or os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "player.py",

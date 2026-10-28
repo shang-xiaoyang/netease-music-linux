@@ -16,7 +16,7 @@ if ROOT not in sys.path:
 
 os.environ.setdefault("QT_QUICK_CONTROLS_STYLE", "Basic")
 
-from PyQt5.QtCore import QEvent, QObject, QSize, Qt, QTimer, QUrl
+from PyQt5.QtCore import QEvent, QObject, QSize, Qt, QTimer, QUrl, pyqtSlot
 from PyQt5.QtGui import QGuiApplication, QIcon, QKeyEvent
 from PyQt5.QtQuick import QQuickImageProvider
 from PyQt5.QtQml import QQmlApplicationEngine
@@ -114,14 +114,8 @@ class WindowKeys(QObject):
         app.installEventFilter(self)
 
     def eventFilter(self, watched, event):
-        if event.type() == QEvent.MouseButtonPress and self._window.property("searching"):
-            item = self._window.property("searchItem")
-            if item is not None:
-                local = item.mapFromGlobal(event.globalPos())
-                inside = 0 <= local.x() <= item.width() and 0 <= local.y() <= item.height()
-                if not inside:
-                    self._window.setProperty("blurSearch", True)
-            return False
+        # 搜索框失焦由界面自己处理。这里按“点在搜索框外”提前收起时，
+        # 下拉层会被拆掉，同一次点击就落到下面的歌单上。
         if event.type() != QEvent.KeyPress or not isinstance(event, QKeyEvent):
             return False
         if QGuiApplication.focusWindow() is not self._window:
@@ -162,32 +156,58 @@ class WindowKeys(QObject):
 
 
 class GlobalHotkeys(QObject):
-    """麒麟 Wayland 合成器的全局快捷键。窗口快捷键在这台机器上收不到按键。"""
+    """麒麟 Wayland 合成器的全局快捷键。
+
+    登记仍走合成器会话。回调必须挂在 Qt 的 D-Bus 上：
+    这个进程没有 GLib 主循环，GLib.idle_add 的回调不会被执行。
+    """
 
     def __init__(self, bridge):
         super().__init__()
         self._bridge = bridge
         self.error = ""
         self.ready = []
+        self._session = None
         try:
             from player import GlobalHotkeys as GtkHotkeys
         except Exception as exc:
             self.error = str(exc)
             return
-        self._keys = GtkHotkeys(self._handle)
+        self._keys = GtkHotkeys(lambda _action: False)
         self.error = self._keys.error
         self.ready = list(self._keys.ready)
+        session = getattr(self._keys, "_session", None)
+        if session is None:
+            return
+        try:
+            from PyQt5.QtDBus import QDBusConnection
+        except ImportError as exc:
+            self.error = self.error or f"缺少 Qt D-Bus：{exc}"
+            return
+        bus = QDBusConnection.sessionBus()
+        if not bus.isConnected():
+            self.error = self.error or "连不上会话总线，快捷键无法回调"
+            return
+        path = str(session.object_path)
+        # 发送方留空。按服务名过滤时，Qt 收不到这条信号。
+        if not bus.connect(
+            "",
+            path,
+            "com.kylin.Wlcom.GlobalShortcuts.Session",
+            "Activated",
+            "sta{sv}",
+            self._activated,
+        ):
+            self.error = self.error or (bus.lastError().message() or "快捷键回调没有挂上")
 
-    def _handle(self, action):
-        QTimer.singleShot(0, lambda: self._run(action))
-        return False
-
-    def _run(self, action):
-        if action == "playpause":
+    @pyqtSlot(str, "qulonglong", "QVariantMap")
+    def _activated(self, action, _timestamp, _options):
+        name = str(action)
+        if name == "playpause":
             self._bridge.toggle()
-        elif action == "next-track":
+        elif name == "next-track":
             self._bridge.next()
-        elif action == "prev-track":
+        elif name == "prev-track":
             self._bridge.previous()
 
 
