@@ -1,8 +1,8 @@
-import QtQuick 2.15
-import QtQuick.Controls 2.15
-import QtQuick.Layouts 1.15
-import QtGraphicalEffects 1.15
-import QtQml 2.15
+import QtQuick 2.12
+import QtQuick.Controls 2.12
+import QtQuick.Layouts 1.12
+import QtGraphicalEffects 1.12
+import QtQml 2.12
 import "components"
 
 ApplicationWindow {
@@ -62,6 +62,7 @@ ApplicationWindow {
     property var cardModel: typeof cardList !== "undefined" ? cardList : null
     property var songModel: typeof songList !== "undefined" ? songList : null
     property var albumModel: typeof albumList !== "undefined" ? albumList : null
+    property var eventModel: typeof eventList !== "undefined" ? eventList : null
     property var commentModel: typeof commentList !== "undefined" ? commentList : null
     property var downloadModel: typeof downloadList !== "undefined" ? downloadList : null
     property string loginKey: ""
@@ -69,12 +70,15 @@ ApplicationWindow {
     property string detailSub: ""
     property string detailBrief: ""
     property string detailCover: ""
+    property string artistTab: "songs"
     property string lyricText: "歌词加载中…"
     property string currentSongId: ""
     property string currentArtists: ""
     property bool playlistOwned: false
     property bool playlistCollected: false
     property int playlistSpecial: 0
+    property string playlistCreator: ""
+    property string playlistCreatorId: ""
 
     function clock(ms) {
         var value = Math.max(0, Math.floor(Number(ms || 0) / 1000))
@@ -83,76 +87,100 @@ ApplicationWindow {
         return (min < 10 ? "0" : "") + min + ":" + (sec < 10 ? "0" : "") + sec
     }
 
-    Connections {
-        target: appBridge
-        function onStatusChanged(text) { status.text = text }
-        function onSuggestChanged(text) { window.suggestText = text || "" }
-        function onStateChanged(state) {
-            window.playing = state === "playing"
-            window.positionAnchor = window.position
+    // 桥把信号写进这些属性。属性变化在 Qt 5.12 和 5.15 上都能接到，
+    // Connections 的两种写法各只能用一边。
+    property string bridgeStatus: ""
+    property string bridgeSuggest: ""
+    property string bridgeState: ""
+    property string bridgeClock: ""
+    property string bridgeSong: ""
+    property string bridgePage: ""
+    property string bridgeAccount: ""
+    property string bridgeMode: ""
+    property string bridgeRate: ""
+    property string bridgeQuality: ""
+    property string bridgeVolume: ""
+    property string bridgeCover: ""
+    property string bridgeDetail: ""
+    property string bridgeLyric: ""
+    property string bridgeArtistTab: ""
+    property string bridgeHistory: ""
+    property string bridgeLoginKey: ""
+    property string bridgeQualities: ""
+    property string bridgeLiked: ""
+    property string bridgeCurrentSong: ""
+    property string bridgePlaylistMeta: ""
+    onBridgeStatusChanged: status.text = bridgeStatus
+    onBridgeSuggestChanged: window.suggestText = bridgeSuggest || ""
+    onBridgeStateChanged: {
+        window.playing = bridgeState === "playing"
+        window.positionAnchor = window.position
+        window.positionAt = Date.now()
+    }
+    onBridgeClockChanged: {
+        var parts = bridgeClock.split(",")
+        window.position = Number(parts[0])
+        window.duration = Number(parts[1])
+        window.positionAnchor = window.position
+        window.positionAt = Date.now()
+    }
+    onBridgeSongChanged: {
+        var parts = bridgeSong.split("\n")
+        window.songTitle = parts[1] || ""
+        window.songArtist = parts[2] || ""
+        window.songAlbum = parts[6] || ""
+        window.duration = Number(parts[4] || 0)
+        window.currentArtists = parts[5] || ""
+        if (parts[0] !== window.currentSongId) {
+            window.currentSongId = parts[0] || ""
+            window.position = 0
+            window.positionAnchor = 0
             window.positionAt = Date.now()
         }
-        function onClockChanged(payload) {
-            var parts = payload.split(",")
-            window.position = Number(parts[0])
-            window.duration = Number(parts[1])
-            window.positionAnchor = window.position
-            window.positionAt = Date.now()
+        window.playing = false
+    }
+    onBridgePageChanged: {
+        var parts = bridgePage.split("\n")
+        window.pageName = parts[0] || ""
+        window.pageTitle = parts.slice(1).join("\n")
+        if (window.pageName === "list" || window.pageName === "playlist")
+            window.listReset = window.listReset + 1
+    }
+    onBridgeAccountChanged: account.text = bridgeAccount
+    onBridgeModeChanged: window.modeText = bridgeMode
+    onBridgeRateChanged: {
+        window.positionAnchor = window.position
+        window.positionAt = Date.now()
+        window.playRate = Number(bridgeRate)
+    }
+    onBridgeQualityChanged: window.qualityText = bridgeQuality
+    onBridgeVolumeChanged: window.volume = Number(bridgeVolume)
+    onBridgeCoverChanged: window.coverPath = bridgeCover
+    onBridgeDetailChanged: {
+        if (bridgeDetail.indexOf("cover\n") === 0) {
+            window.detailCover = bridgeDetail.slice(6)
+            return
         }
-        function onSongChanged(payload) {
-            var parts = payload.split("\n")
-            window.songTitle = parts[1] || ""
-            window.songArtist = parts[2] || ""
-            window.songAlbum = parts[6] || ""
-            window.duration = Number(parts[4] || 0)
-            window.currentArtists = parts[5] || ""
-            if (parts[0] !== window.currentSongId) {
-                window.currentSongId = parts[0] || ""
-                window.position = 0
-                window.positionAnchor = 0
-                window.positionAt = Date.now()
-            }
-            window.playing = false
-        }
-            function onPageChanged(name, title) {
-            window.pageName = name
-            window.pageTitle = title
-            if (name === "list" || name === "playlist")
-                window.listReset = window.listReset + 1
-        }
-        function onAccountChanged(label) { account.text = label }
-        function onModeChanged(label) { window.modeText = label }
-        function onRateChanged(rate) {
-            window.positionAnchor = window.position
-            window.positionAt = Date.now()
-            window.playRate = rate
-        }
-        function onQualityChanged(label) { window.qualityText = label }
-        function onVolumeChanged(value) { window.volume = value }
-        function onCoverChanged(path) { window.coverPath = path }
-        function onDetailChanged(payload) {
-            if (payload.indexOf("cover\n") === 0) {
-                window.detailCover = payload.slice(6)
-                return
-            }
-            var parts = payload.split("\n")
-            window.detailName = parts[0] || ""
-            window.detailSub = parts[1] || ""
-            window.detailBrief = parts.slice(2).join("\n")
-            window.detailCover = ""
-        }
-        function onLyricChanged(text) { window.lyricText = text }
-        function onHistoryChanged(text) { window.searchHistory = text || "" }
-        function onLoginKeyChanged(key) { window.loginKey = key }
-        function onQualitiesChanged(text) { qualityMenu.model = text }
-        function onLikedChanged(value) { window.liked = value }
-        function onCurrentSongChanged(songId) { window.currentSongId = songId }
-        function onPlaylistMetaChanged(payload) {
-            var parts = (payload || "").split("|")
-            window.playlistOwned = parts[0] === "1"
-            window.playlistCollected = parts[1] === "1"
-            window.playlistSpecial = Number(parts[2] || 0)
-        }
+        var parts = bridgeDetail.split("\n")
+        window.detailName = parts[0] || ""
+        window.detailSub = parts[1] || ""
+        window.detailBrief = parts.slice(2).join("\n")
+        window.detailCover = ""
+    }
+    onBridgeLyricChanged: window.lyricText = bridgeLyric
+    onBridgeArtistTabChanged: window.artistTab = bridgeArtistTab || "songs"
+    onBridgeHistoryChanged: window.searchHistory = bridgeHistory || ""
+    onBridgeLoginKeyChanged: window.loginKey = bridgeLoginKey
+    onBridgeQualitiesChanged: qualityMenu.model = bridgeQualities
+    onBridgeLikedChanged: window.liked = bridgeLiked === "1"
+    onBridgeCurrentSongChanged: window.currentSongId = bridgeCurrentSong
+    onBridgePlaylistMetaChanged: {
+        var parts = (bridgePlaylistMeta || "").split("|")
+        window.playlistOwned = parts[0] === "1"
+        window.playlistCollected = parts[1] === "1"
+        window.playlistSpecial = Number(parts[2] || 0)
+        window.playlistCreatorId = parts[3] || ""
+        window.playlistCreator = parts.slice(4).join("|")
     }
 
     Rectangle {
@@ -351,12 +379,16 @@ ApplicationWindow {
             }
         }
         MouseArea {
+            id: titleDrag
             anchors.fill: parent
             z: -1
             acceptedButtons: Qt.LeftButton
             propagateComposedEvents: true
+            property real grabX: 0
+            property real grabY: 0
+            property bool dragging: false
             onDoubleClicked: window.visibility === 4 ? window.showNormal() : window.showMaximized()
-            onPressed: function(mouse) {
+            onPressed: {
                 var searchPoint = searchBox.mapFromItem(titleBar, mouse.x, mouse.y)
                 var accountPoint = account.mapFromItem(titleBar, mouse.x, mouse.y)
                 var onSearch = searchPoint.x >= 0 && searchPoint.x <= searchBox.width && searchPoint.y >= 0 && searchPoint.y <= searchBox.height
@@ -364,13 +396,25 @@ ApplicationWindow {
                 // 下拉层画在标题栏下面，但父级是窗口。点在层上时不要当成拖窗口。
                 var popPoint = suggestPopup.mapFromItem(titleBar, mouse.x, mouse.y)
                 var onPopup = suggestPopup.visible && popPoint.x >= 0 && popPoint.x <= suggestPopup.width && popPoint.y >= 0 && popPoint.y <= suggestPopup.height
-                if (onSearch || onAccount || onPopup)
+                if (onSearch || onAccount || onPopup) {
+                    dragging = false
                     mouse.accepted = false
-                else {
+                } else {
                     leaveSearch()
-                    window.startSystemMove()
+                    // 记下指针相对窗口的位置。全局坐标在这个系统上会跟着窗口一起变，不能拿来算位移。
+                    grabX = mouse.x
+                    grabY = mouse.y + titleBar.y
+                    dragging = window.visibility !== 4
                 }
             }
+            onPositionChanged: {
+                if (!dragging)
+                    return
+                var cursor = titleBar.mapToGlobal(mouse.x, mouse.y)
+                window.x = cursor.x - grabX
+                window.y = cursor.y - grabY
+            }
+            onReleased: dragging = false
         }
     }
 
@@ -383,7 +427,7 @@ ApplicationWindow {
         MouseArea {
             anchors.fill: parent
             z: -1
-            onPressed: function(mouse) {
+            onPressed: {
                 if (suggestPopup.visible || search.activeFocus)
                     leaveSearch()
                 mouse.accepted = false
@@ -403,6 +447,7 @@ ApplicationWindow {
                 anchors.topMargin: 8
                 model: window.navModel
                 clip: true
+                cacheBuffer: 400
                 delegate: Item {
                     width: nav.width
                     height: kind === "section" ? 28 : 34
@@ -653,12 +698,10 @@ ApplicationWindow {
                         z: 1
                     }
                 }
-                RotationAnimation {
-                    id: vinylSpin
+                RotationAnimator {
                     target: disc
-                    property: "rotation"
-                    from: disc.rotation
-                    to: disc.rotation + 360
+                    from: 0
+                    to: 360
                     duration: 18000
                     loops: Animation.Infinite
                     running: window.playing && lyricStage.visible
@@ -736,7 +779,11 @@ ApplicationWindow {
                     anchors.topMargin: 22
                     clip: true
                     model: window.lyricText === "" ? ["0\t歌词加载中…"] : window.lyricText.split("\n")
+                    cacheBuffer: 240
                     property int lineAt: {
+                        // 新歌词还没到时只有占位行。这时不能拿上一首残留的进度去对，否则会来回停在同一行。
+                        if (window.lyricText === "")
+                            return 0
                         var lines = model
                         var at = 0
                         for (var i = 0; i < lines.length; i++) {
@@ -982,10 +1029,37 @@ ApplicationWindow {
                                         }
                                     }
                                     Label { text: name; width: 120; elide: Text.ElideRight; color: "#222222"; font.pixelSize: 12 }
-                                    Label { text: (creator ? creator + " · " : "") + count + " 首"; width: 120; elide: Text.ElideRight; color: "#8E8E93"; font.pixelSize: 11 }
+                                    Row {
+                                        width: 120
+                                        spacing: 0
+                                        Label {
+                                            text: creator || ""
+                                            width: Math.min(implicitWidth, creator ? 72 : 0)
+                                            visible: creator !== ""
+                                            elide: Text.ElideRight
+                                            color: creatorHover.containsMouse ? "#EC4141" : "#507DAF"
+                                            font.pixelSize: 11
+                                            MouseArea {
+                                                id: creatorHover
+                                                anchors.fill: parent
+                                                hoverEnabled: true
+                                                cursorShape: Qt.PointingHandCursor
+                                                onClicked: appBridge.openUser(creatorId, creator)
+                                                ToolTip.visible: containsMouse
+                                                ToolTip.text: "打开作者：" + creator
+                                                ToolTip.delay: 300
+                                            }
+                                        }
+                                        Label {
+                                            text: (creator ? " · " : "") + count + " 首"
+                                            color: "#8E8E93"
+                                            font.pixelSize: 11
+                                        }
+                                    }
                                 }
                                 MouseArea {
                                     anchors.fill: parent
+                                    z: -1
                                     onClicked: appBridge.openPlaylist(itemId, name)
                                 }
                             }
@@ -1058,14 +1132,23 @@ ApplicationWindow {
                 }
                 Component {
                     id: songPage
-                ColumnLayout {
+                ListView {
+                    id: songView
+                    objectName: "songView"
                     Layout.fillWidth: true
                     Layout.fillHeight: true
-                    spacing: 0
+                    clip: true
+                    boundsBehavior: Flickable.StopAtBounds
+                    ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+                    cacheBuffer: 480
+                    header: Column {
+                        id: songColumn
+                        width: songView.width
+                        spacing: 0
                     Row {
-                        Layout.leftMargin: 16
-                        Layout.topMargin: 4
-                        Layout.preferredHeight: window.pageTitle.indexOf("搜索") === 0 ? 28 : 0
+                        leftPadding: 16
+                        topPadding: 4
+                        height: window.pageTitle.indexOf("搜索") === 0 ? 28 : 0
                         visible: window.pageTitle.indexOf("搜索") === 0
                         spacing: 18
                         Label {
@@ -1085,20 +1168,14 @@ ApplicationWindow {
                             }
                         }
                     }
-                ListView {
-                    id: songView
-                    objectName: "songView"
-                    Layout.fillWidth: true
-                    Layout.fillHeight: true
-                    model: window.songModel
-                    cacheBuffer: 1200
-                    clip: true
-                    boundsBehavior: Flickable.StopAtBounds
-                    onAtYEndChanged: if (atYEnd && count > 0) appBridge.moreSongs()
-                    Connections {
-                        target: window
-                        function onListResetChanged() { songView.positionViewAtBeginning() }
                     }
+                    model: window.songModel
+                    onContentYChanged: {
+                        if (contentHeight - contentY - height < 240)
+                            appBridge.moreSongs()
+                    }
+                    property int resetWatch: window.listReset
+                    onResetWatchChanged: contentY = 0
                     property int menuRow: -1
                     property var artistPeople: []
                     function openArtists(people) {
@@ -1210,20 +1287,32 @@ ApplicationWindow {
                     }
                 }
                 }
-                }
 
                 Component {
                     id: playlistPage
-                    ColumnLayout {
+                    ListView {
+                        id: playlistSongs
                         Layout.fillWidth: true
                         Layout.fillHeight: true
-                        spacing: 8
-                        Row {
-                            Layout.leftMargin: 16
-                            Layout.rightMargin: 16
-                            Layout.topMargin: 8
-                            Layout.fillWidth: true
-                            Layout.preferredHeight: 168
+                        clip: true
+                        boundsBehavior: Flickable.StopAtBounds
+                        ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+                        cacheBuffer: 480
+                        header: Column {
+                            id: playlistColumn
+                            width: playlistSongs.width
+                            spacing: 8
+                            topPadding: 8
+                        Rectangle {
+                            width: parent.width
+                            height: playlistIntro.implicitHeight + 28
+                            color: "#FFFFFF"
+                            Row {
+                            id: playlistIntro
+                            leftPadding: 16
+                            rightPadding: 16
+                            topPadding: 14
+                            width: parent.width
                             spacing: 16
                             Rectangle {
                                 width: 132
@@ -1240,7 +1329,7 @@ ApplicationWindow {
                                 }
                             }
                             Column {
-                                width: parent.width - 148
+                                width: parent.width - 180
                                 spacing: 6
                                 anchors.verticalCenter: parent.verticalCenter
                                 Label {
@@ -1251,13 +1340,41 @@ ApplicationWindow {
                                     width: parent.width
                                     elide: Text.ElideRight
                                 }
-                                Label {
-                                    text: window.detailSub
-                                    color: "#8E8E93"
-                                    font.pixelSize: 13
-                                    visible: text !== ""
+                                Row {
                                     width: parent.width
-                                    elide: Text.ElideRight
+                                    spacing: 0
+                                    visible: window.playlistCreator !== "" || window.detailSub !== ""
+                                    Label {
+                                        id: playlistCreatorLink
+                                        text: window.playlistCreator
+                                        visible: text !== ""
+                                        color: playlistCreatorHit.containsMouse ? "#EC4141" : "#507DAF"
+                                        font.pixelSize: 13
+                                        MouseArea {
+                                            id: playlistCreatorHit
+                                            enabled: window.playlistCreatorId !== ""
+                                            anchors.fill: parent
+                                            hoverEnabled: true
+                                            cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                                            onClicked: appBridge.openUser(window.playlistCreatorId, window.playlistCreator)
+                                            ToolTip.visible: containsMouse && enabled
+                                            ToolTip.text: "打开作者：" + window.playlistCreator
+                                            ToolTip.delay: 300
+                                        }
+                                    }
+                                    Label {
+                                        text: {
+                                            var sub = window.detailSub || ""
+                                            if (window.playlistCreator === "")
+                                                return sub
+                                            var prefix = window.playlistCreator + " · "
+                                            return sub.indexOf(prefix) === 0 ? sub.slice(prefix.length) : ""
+                                        }
+                                        color: "#8E8E93"
+                                        font.pixelSize: 13
+                                        elide: Text.ElideRight
+                                        width: Math.max(0, parent.width - playlistCreatorLink.implicitWidth)
+                                    }
                                 }
                                 Label {
                                     text: window.detailBrief
@@ -1337,34 +1454,29 @@ ApplicationWindow {
                                     }
                                 }
                             }
-                        }
-                        ListView {
-                            id: playlistSongs
-                            Layout.fillWidth: true
-                            Layout.fillHeight: true
-                            model: window.songModel
-                            cacheBuffer: 1200
-                            clip: true
-                            boundsBehavior: Flickable.StopAtBounds
-                            onAtYEndChanged: if (atYEnd && count > 0) appBridge.moreSongs()
-                            Connections {
-                                target: window
-                                function onListResetChanged() { playlistSongs.positionViewAtBeginning() }
                             }
-                            function openRowMenu(row) { songMenuState.open(row) }
-                            delegate: ItemDelegate {
+                        }
+                        }
+                        model: window.songModel
+                        onContentYChanged: {
+                            if (contentHeight - contentY - height < 240)
+                                appBridge.moreSongs()
+                        }
+                        property int resetWatch: window.listReset
+                        onResetWatchChanged: contentY = 0
+                        delegate: ItemDelegate {
                                 width: playlistSongs.width
                                 height: 56
                                 opacity: model.playable === false ? 0.38 : 1
                                 onDoubleClicked: if (model.playable !== false) appBridge.playRow(index)
-                                onPressAndHold: playlistSongs.openRowMenu(index)
+                                onPressAndHold: songMenuState.open(index)
                                 background: Rectangle {
-                                    color: model.songId === window.currentSongId ? "#FDECEC" : (parent.hovered && !playlistSongs.moving ? "#E8F3FF" : "transparent")
+                                    color: model.songId === window.currentSongId ? "#FDECEC" : (parent.hovered ? "#E8F3FF" : "transparent")
                                 }
                                 MouseArea {
                                     anchors.fill: parent
                                     acceptedButtons: Qt.RightButton
-                                    onClicked: playlistSongs.openRowMenu(index)
+                                    onClicked: songMenuState.open(index)
                                 }
                                 RowLayout {
                                     anchors.fill: parent
@@ -1397,7 +1509,6 @@ ApplicationWindow {
                                 }
                             }
                         }
-                    }
                 }
                 Loader {
                     active: window.pageName === "album"
@@ -1407,16 +1518,30 @@ ApplicationWindow {
                 }
                 Component {
                     id: albumPage
-                ColumnLayout {
+                Flickable {
+                    id: albumFlick
                     Layout.fillWidth: true
                     Layout.fillHeight: true
-                    spacing: 12
+                    contentWidth: width
+                    contentHeight: albumColumn.implicitHeight + 24
+                    clip: true
+                    boundsBehavior: Flickable.StopAtBounds
+                    ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+                    Column {
+                        id: albumColumn
+                        width: albumFlick.width
+                        spacing: 12
+                        topPadding: 8
+                    Rectangle {
+                        width: parent.width
+                        height: albumIntro.implicitHeight + 28
+                        color: "#FFFFFF"
                     Row {
-                        Layout.leftMargin: 16
-                        Layout.rightMargin: 16
-                        Layout.topMargin: 8
-                        Layout.preferredHeight: 168
-                        Layout.fillWidth: true
+                        id: albumIntro
+                        leftPadding: 16
+                        rightPadding: 16
+                        topPadding: 14
+                        width: parent.width
                         spacing: 18
                         Rectangle {
                             width: 168
@@ -1433,7 +1558,7 @@ ApplicationWindow {
                             }
                         }
                         Column {
-                            width: parent.width - 186
+                            width: parent.width - 218
                             spacing: 6
                             anchors.verticalCenter: parent.verticalCenter
                             Label {
@@ -1462,25 +1587,20 @@ ApplicationWindow {
                             }
                         }
                     }
-                    ListView {
+                    }
+                    Repeater {
                         id: detailSongs
-                        Layout.fillWidth: true
-                        Layout.fillHeight: true
                         model: window.songModel
-                        clip: true
-                        function openRowMenu(row) {
-                            songMenuState.open(row)
-                        }
                         delegate: ItemDelegate {
-                            width: detailSongs.width
+                            width: albumColumn.width
                             height: 48
                             opacity: model.playable === false ? 0.38 : 1
                             onDoubleClicked: if (model.playable !== false) appBridge.playRow(index)
-                            onPressAndHold: detailSongs.openRowMenu(index)
+                            onPressAndHold: songMenuState.open(index)
                             MouseArea {
                                 anchors.fill: parent
                                 acceptedButtons: Qt.RightButton
-                                onClicked: detailSongs.openRowMenu(index)
+                                onClicked: songMenuState.open(index)
                             }
                             RowLayout {
                                 anchors.fill: parent
@@ -1508,6 +1628,7 @@ ApplicationWindow {
                             }
                         }
                     }
+                    }
                 }
                 }
 
@@ -1519,167 +1640,342 @@ ApplicationWindow {
                 }
                 Component {
                     id: artistPage
-                ColumnLayout {
-                    Layout.fillWidth: true
-                    Layout.fillHeight: true
-                    spacing: 12
-                    Row {
-                        Layout.leftMargin: 16
-                        Layout.rightMargin: 16
-                        Layout.topMargin: 8
-                        Layout.preferredHeight: 132
-                        Layout.fillWidth: true
-                        spacing: 18
-                        Rectangle {
-                            width: 132
-                            height: 132
-                            radius: 66
-                            color: "#F3D6D6"
-                            clip: true
-                            Image {
-                                anchors.fill: parent
-                                source: window.detailCover ? Qt.resolvedUrl("file://" + window.detailCover) : ""
-                                sourceSize: Qt.size(132, 132)
-                                fillMode: Image.PreserveAspectCrop
-                                asynchronous: true
-                            }
-                        }
-                        Column {
-                            width: parent.width - 150
-                            spacing: 6
-                            anchors.verticalCenter: parent.verticalCenter
-                            Label {
-                                text: window.detailName
-                                color: "#222222"
-                                font.pixelSize: 20
-                                font.bold: true
-                                width: parent.width
-                                elide: Text.ElideRight
-                            }
-                            Label {
-                                text: window.detailSub
-                                color: "#8E8E93"
-                                font.pixelSize: 12
-                                visible: text !== ""
-                                width: parent.width
-                                elide: Text.ElideRight
-                            }
-                            Label {
-                                text: window.detailBrief
-                                color: "#666666"
-                                font.pixelSize: 12
-                                wrapMode: Text.Wrap
-                                width: parent.width
-                                maximumLineCount: 4
-                                elide: Text.ElideRight
-                                visible: text !== ""
-                            }
-                        }
-                    }
-                    Label {
-                        text: "专辑"
-                        color: "#333333"
-                        font.pixelSize: 14
-                        font.bold: true
-                        Layout.leftMargin: 16
-                        visible: albumChips.count > 0
-                    }
-                    ListView {
-                        id: albumChips
-                        Layout.fillWidth: true
-                        Layout.preferredHeight: albumChips.count > 0 ? 148 : 0
-                        Layout.leftMargin: 16
-                        orientation: ListView.Horizontal
-                        spacing: 12
-                        model: window.albumModel
-                        clip: true
-                        delegate: Item {
-                            width: 96
-                            height: 140
-                            Column {
-                                spacing: 4
-                                Rectangle {
-                                    width: 96
-                                    height: 96
-                                    radius: 6
-                                    color: "#F3D6D6"
-                                    clip: true
-                                    Image {
-                                        anchors.fill: parent
-                                        source: model.local ? Qt.resolvedUrl("file://" + model.local) : ""
-                                        sourceSize: Qt.size(36, 36)
-                                        fillMode: Image.PreserveAspectCrop
-                                        asynchronous: true
-                                    }
-                                }
-                                Label {
-                                    text: model.name || ""
-                                    width: 96
-                                    color: "#333333"
-                                    font.pixelSize: 12
-                                    elide: Text.ElideRight
-                                }
-                                Label {
-                                    text: model.publish || ""
-                                    width: 96
-                                    color: "#8E8E93"
-                                    font.pixelSize: 11
-                                    elide: Text.ElideRight
-                                }
-                            }
-                            MouseArea {
-                                anchors.fill: parent
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: appBridge.openAlbum(model.itemId, model.name)
-                            }
-                        }
-                    }
-                    ListView {
-                        id: artistSongs
+                    Flickable {
+                        id: artistFlick
                         Layout.fillWidth: true
                         Layout.fillHeight: true
-                        model: window.songModel
+                        contentWidth: width
+                        contentHeight: artistColumn.implicitHeight + 24
                         clip: true
-                        function openRowMenu(row) {
-                            songMenuState.open(row)
-                        }
-                        delegate: ItemDelegate {
-                            width: artistSongs.width
-                            height: 48
-                            opacity: model.playable === false ? 0.38 : 1
-                            onDoubleClicked: if (model.playable !== false) appBridge.playRow(index)
-                            onPressAndHold: artistSongs.openRowMenu(index)
-                            MouseArea {
-                                anchors.fill: parent
-                                acceptedButtons: Qt.RightButton
-                                onClicked: artistSongs.openRowMenu(index)
-                            }
-                            RowLayout {
-                                anchors.fill: parent
-                                anchors.leftMargin: 16
-                                anchors.rightMargin: 16
+                        boundsBehavior: Flickable.StopAtBounds
+                        ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+                        Column {
+                            id: artistColumn
+                            width: artistFlick.width
+                            spacing: 12
+                            topPadding: 8
+                            Rectangle {
+                                width: parent.width
+                                height: artistIntro.implicitHeight + 16
+                                color: "#FFFFFF"
+                            Column {
+                                id: artistIntro
+                                width: parent.width
+                                topPadding: 14
+                                bottomPadding: 12
                                 spacing: 10
-                                Label { text: index + 1; color: "#8E8E93"; Layout.preferredWidth: 28 }
+                            Row {
+                                leftPadding: 16
+                                rightPadding: 16
+                                width: parent.width
+                                spacing: 18
                                 Rectangle {
-                                    width: 36
-                                    height: 36
-                                    radius: 4
+                                    width: 132
+                                    height: 132
+                                    radius: 66
                                     color: "#F3D6D6"
                                     clip: true
                                     Image {
                                         anchors.fill: parent
-                                        source: model.local ? Qt.resolvedUrl("file://" + model.local) : ""
-                                        sourceSize: Qt.size(36, 36)
+                                        source: window.detailCover ? Qt.resolvedUrl("file://" + window.detailCover) : ""
+                                        sourceSize: Qt.size(132, 132)
                                         fillMode: Image.PreserveAspectCrop
                                         asynchronous: true
                                     }
                                 }
-                                Label { text: model.name || ""; Layout.fillWidth: true; elide: Text.ElideRight; color: "#333333" }
-                                Label { text: clock(model.duration); color: "#8E8E93"; Layout.preferredWidth: 48 }
+                                Column {
+                                    width: parent.width - 182
+                                    spacing: 6
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    Label {
+                                        text: window.detailName
+                                        color: "#222222"
+                                        font.pixelSize: 20
+                                        font.bold: true
+                                        width: parent.width
+                                        elide: Text.ElideRight
+                                    }
+                                    Label {
+                                        text: window.detailSub
+                                        color: "#8E8E93"
+                                        font.pixelSize: 12
+                                        visible: text !== ""
+                                        width: parent.width
+                                        elide: Text.ElideRight
+                                    }
+                                }
+                            }
+                            }
+                            }
+                            Row {
+                                id: artistTabs
+                                leftPadding: 16
+                                spacing: 8
+                                topPadding: 4
+                                property var tabs: [
+                                    { key: "home", text: "主页" },
+                                    { key: "songs", text: "歌曲" },
+                                    { key: "albums", text: "专辑" },
+                                    { key: "blog", text: "博客" }
+                                ]
+                                Repeater {
+                                    model: artistTabs.tabs
+                                    delegate: Rectangle {
+                                        width: tabLabel.implicitWidth + 28
+                                        height: 30
+                                        radius: 15
+                                        color: window.artistTab === modelData.key ? "#EC4141" : (tabHover.containsMouse ? "#FDECEC" : "#FFFFFF")
+                                        border.color: window.artistTab === modelData.key ? "#EC4141" : "#E6E6E8"
+                                        Label {
+                                            id: tabLabel
+                                            anchors.centerIn: parent
+                                            text: modelData.text
+                                            color: window.artistTab === modelData.key ? "#FFFFFF" : "#333333"
+                                            font.pixelSize: 13
+                                        }
+                                        MouseArea {
+                                            id: tabHover
+                                            anchors.fill: parent
+                                            hoverEnabled: true
+                                            cursorShape: Qt.PointingHandCursor
+                                            onClicked: appBridge.setArtistTab(modelData.key)
+                                        }
+                                    }
+                                }
+                            }
+                            Item {
+                                width: parent.width
+                                height: artistHome.implicitHeight
+                                visible: window.artistTab === "home"
+                                Column {
+                                    id: artistHome
+                                    width: parent.width
+                                    leftPadding: 16
+                                    rightPadding: 16
+                                    spacing: 8
+                                    Label {
+                                        text: window.detailBrief !== "" ? window.detailBrief : "这个歌手还没有介绍"
+                                        color: "#666666"
+                                        font.pixelSize: 13
+                                        wrapMode: Text.Wrap
+                                        width: parent.width - 32
+                                    }
+                                }
+                            }
+                            Column {
+                                width: parent.width
+                                visible: window.artistTab === "songs"
+                                spacing: 0
+                                Label {
+                                    text: artistSongs.count > 0 ? "热门 " + artistSongs.count + " 首" : "还没有歌曲"
+                                    color: "#8E8E93"
+                                    font.pixelSize: 12
+                                    leftPadding: 16
+                                    bottomPadding: 4
+                                }
+                                Repeater {
+                                    id: artistSongs
+                                    model: window.artistTab === "songs" ? window.songModel : null
+                                    delegate: ItemDelegate {
+                                        width: artistColumn.width
+                                        height: 56
+                                        opacity: model.playable === false ? 0.38 : 1
+                                        onDoubleClicked: if (model.playable !== false) appBridge.playRow(index)
+                                        onPressAndHold: songMenuState.open(index)
+                                        background: Rectangle {
+                                            color: model.songId === window.currentSongId ? "#FDECEC" : (parent.hovered ? "#E8F3FF" : "transparent")
+                                        }
+                                        MouseArea {
+                                            anchors.fill: parent
+                                            acceptedButtons: Qt.RightButton
+                                            onClicked: songMenuState.open(index)
+                                        }
+                                        RowLayout {
+                                            anchors.fill: parent
+                                            anchors.leftMargin: 16
+                                            anchors.rightMargin: 16
+                                            spacing: 10
+                                            Label { text: index + 1; color: "#8E8E93"; Layout.preferredWidth: 28 }
+                                            Rectangle {
+                                                width: 36
+                                                height: 36
+                                                radius: 8
+                                                color: "#F3D6D6"
+                                                clip: true
+                                                Image {
+                                                    anchors.fill: parent
+                                                    source: model.local ? Qt.resolvedUrl("file://" + model.local) : ""
+                                                    sourceSize: Qt.size(36, 36)
+                                                    fillMode: Image.PreserveAspectCrop
+                                                    asynchronous: true
+                                                }
+                                            }
+                                            Label {
+                                                text: model.name || ""
+                                                color: model.songId === window.currentSongId ? "#EC4141" : "#333333"
+                                                Layout.fillWidth: true
+                                                elide: Text.ElideRight
+                                            }
+                                            Label {
+                                                text: model.album || ""
+                                                color: "#507DAF"
+                                                Layout.preferredWidth: 160
+                                                elide: Text.ElideRight
+                                                MouseArea {
+                                                    anchors.fill: parent
+                                                    hoverEnabled: true
+                                                    cursorShape: Qt.PointingHandCursor
+                                                    onClicked: appBridge.openAlbum(model.albumId, model.album)
+                                                    ToolTip.visible: containsMouse
+                                                    ToolTip.text: "打开专辑：" + (model.album || "")
+                                                    ToolTip.delay: 300
+                                                }
+                                            }
+                                            Label { text: clock(model.duration); color: "#8E8E93"; Layout.preferredWidth: 48 }
+                                        }
+                                    }
+                                }
+                            }
+                            Flow {
+                                width: parent.width - 32
+                                x: 16
+                                visible: window.artistTab === "albums"
+                                spacing: 16
+                                Repeater {
+                                    model: window.artistTab === "albums" ? window.albumModel : null
+                                    delegate: Item {
+                                        width: 120
+                                        height: 176
+                                        Column {
+                                            spacing: 4
+                                            Rectangle {
+                                                width: 120
+                                                height: 120
+                                                radius: 8
+                                                color: "#F3D6D6"
+                                                clip: true
+                                                Image {
+                                                    anchors.fill: parent
+                                                    source: model.local ? Qt.resolvedUrl("file://" + model.local) : ""
+                                                    sourceSize: Qt.size(120, 120)
+                                                    fillMode: Image.PreserveAspectCrop
+                                                    asynchronous: true
+                                                }
+                                            }
+                                            Label {
+                                                text: model.name || ""
+                                                width: 120
+                                                color: "#333333"
+                                                font.pixelSize: 13
+                                                elide: Text.ElideRight
+                                            }
+                                            Label {
+                                                text: model.publish || ""
+                                                width: 120
+                                                color: "#8E8E93"
+                                                font.pixelSize: 11
+                                                elide: Text.ElideRight
+                                            }
+                                        }
+                                        MouseArea {
+                                            anchors.fill: parent
+                                            hoverEnabled: true
+                                            cursorShape: Qt.PointingHandCursor
+                                            onClicked: appBridge.openAlbum(model.itemId, model.name)
+                                        }
+                                    }
+                                }
+                            }
+                            Label {
+                                visible: window.artistTab === "albums" && albumList.count === 0
+                                text: "还没有专辑"
+                                color: "#8E8E93"
+                                font.pixelSize: 13
+                                leftPadding: 16
+                            }
+                            Column {
+                                width: parent.width
+                                visible: window.artistTab === "blog"
+                                spacing: 0
+                                Repeater {
+                                    model: window.artistTab === "blog" ? window.eventModel : null
+                                    delegate: Item {
+                                        width: artistColumn.width
+                                        height: Math.max(eventBody.implicitHeight + 24, model.local ? 92 : 0)
+                                        Row {
+                                            id: eventBody
+                                            anchors.left: parent.left
+                                            anchors.right: parent.right
+                                            anchors.leftMargin: 16
+                                            anchors.rightMargin: 16
+                                            anchors.top: parent.top
+                                            anchors.topMargin: 12
+                                            spacing: 12
+                                            Rectangle {
+                                                width: model.local ? 96 : 0
+                                                height: model.local ? 64 : 0
+                                                radius: 6
+                                                color: "#F3D6D6"
+                                                clip: true
+                                                visible: model.local !== ""
+                                                Image {
+                                                    anchors.fill: parent
+                                                    source: model.local ? Qt.resolvedUrl("file://" + model.local) : ""
+                                                    sourceSize: Qt.size(96, 64)
+                                                    fillMode: Image.PreserveAspectCrop
+                                                    asynchronous: true
+                                                }
+                                            }
+                                            Column {
+                                                width: parent.width - (model.local ? 108 : 0)
+                                                spacing: 4
+                                                Label {
+                                                    text: model.title || ""
+                                                    color: "#222222"
+                                                    font.pixelSize: 14
+                                                    font.bold: true
+                                                    wrapMode: Text.Wrap
+                                                    width: parent.width
+                                                }
+                                                Label {
+                                                    text: model.summary || ""
+                                                    color: "#666666"
+                                                    font.pixelSize: 12
+                                                    wrapMode: Text.Wrap
+                                                    width: parent.width
+                                                    maximumLineCount: 2
+                                                    elide: Text.ElideRight
+                                                    visible: text !== ""
+                                                }
+                                                Label {
+                                                    text: (model.when || "") + (model.read && model.read !== "0" ? "    阅读 " + model.read : "")
+                                                    color: "#8E8E93"
+                                                    font.pixelSize: 11
+                                                    visible: text !== ""
+                                                }
+                                            }
+                                        }
+                                        Rectangle {
+                                            anchors.left: parent.left
+                                            anchors.right: parent.right
+                                            anchors.leftMargin: 16
+                                            anchors.bottom: parent.bottom
+                                            height: 1
+                                            color: "#E6E6E8"
+                                        }
+                                    }
+                                }
+                                Label {
+                                    visible: eventList.count === 0
+                                    text: "还没有博客"
+                                    color: "#8E8E93"
+                                    font.pixelSize: 13
+                                    leftPadding: 16
+                                    topPadding: 8
+                                }
                             }
                         }
                     }
-                }
                 }
 
                 Item { Layout.fillWidth: true; Layout.fillHeight: true }
@@ -2004,7 +2300,7 @@ ApplicationWindow {
         spacing: 0
         z: 2
         Timer {
-            interval: 200
+            interval: 500
             running: window.playing && window.duration > 0
             repeat: true
             onTriggered: {
@@ -2043,7 +2339,7 @@ ApplicationWindow {
                 }
                 playBar.closeFloats()
                 queuePopup.open()
-                Qt.callLater(queueView.centerCurrent)
+                centerQueue.restart()
             }
             onToggleLike: appBridge.toggleLike(-1)
             onOpenComments: appBridge.openComments(-1)
@@ -2170,6 +2466,13 @@ ApplicationWindow {
         }
     }
 
+    Timer {
+        id: centerQueue
+        interval: 1
+        repeat: false
+        onTriggered: queueView.centerCurrent()
+    }
+
     Popup {
         id: queuePopup
         parent: window.contentItem
@@ -2180,7 +2483,7 @@ ApplicationWindow {
         y: playColumn.y - height - 8
         padding: 0
         closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
-        onOpened: Qt.callLater(queueView.centerCurrent)
+        onOpened: centerQueue.restart()
         background: Rectangle {
             color: "#FFFFFF"
             radius: 8
@@ -2250,7 +2553,7 @@ ApplicationWindow {
                 }
                 return found
             }
-            onPlayingRowChanged: if (!removingRow) Qt.callLater(centerCurrent)
+            onPlayingRowChanged: if (!removingRow) centerQueue.restart()
             property bool removingRow: false
             function centerCurrent() {
                 var row = playingRow
@@ -2662,8 +2965,6 @@ ApplicationWindow {
     function beginResize(edge, global) {
         if (visibility === 4)
             return
-        if (startSystemResize(edge))
-            return
         resizing = true
         resizeEdges = edge
         resizeX0 = x
@@ -2708,18 +3009,6 @@ ApplicationWindow {
         z: 30
         enabled: window.visibility !== 4
         visible: enabled
-
-        component ResizeGrip: MouseArea {
-            property int edge: 0
-            hoverEnabled: true
-            cursorShape: edge === Qt.LeftEdge || edge === Qt.RightEdge ? Qt.SizeHorCursor
-                : edge === Qt.TopEdge || edge === Qt.BottomEdge ? Qt.SizeVerCursor
-                : edge === (Qt.LeftEdge | Qt.TopEdge) || edge === (Qt.RightEdge | Qt.BottomEdge) ? Qt.SizeFDiagCursor
-                : Qt.SizeBDiagCursor
-            onPressed: function(mouse) { window.beginResize(edge, mapToGlobal(mouse.x, mouse.y)) }
-            onPositionChanged: function(mouse) { if (pressed) window.moveResize(mapToGlobal(mouse.x, mouse.y)) }
-            onReleased: window.resizing = false
-        }
 
         ResizeGrip { edge: Qt.LeftEdge; width: 6; anchors.left: parent.left; anchors.top: parent.top; anchors.bottom: parent.bottom; anchors.topMargin: 8; anchors.bottomMargin: 8 }
         ResizeGrip { edge: Qt.RightEdge; width: 6; anchors.right: parent.right; anchors.top: parent.top; anchors.bottom: parent.bottom; anchors.topMargin: 8; anchors.bottomMargin: 8 }

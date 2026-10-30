@@ -5547,8 +5547,9 @@ def _run_desk_lyric():
         position = int(clock.get("position") or 0)
         if clock.get("playing"):
             position += int((time.time() - float(clock.get("at") or time.time())) * 1000)
+        # 切歌会先写一份空的整首歌词。旧时间轴没清掉时，新歌进度会在上一首里循环。
         local = local_span(position) if window._track.get("lines") else None
-        if local:
+        if local and window._track.get("id") == clock.get("id"):
             line, start, end, word_cut = local
         else:
             line = clock.get("line") or "暂无歌词"

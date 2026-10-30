@@ -874,11 +874,42 @@ def artist_home(artist_id, cookie=""):
         "avatar": artist.get("cover") or artist.get("avatar") or user.get("avatarUrl") or "",
         "alias": " / ".join(artist.get("alias") or []),
         "brief": artist.get("briefDesc") or "",
+        "desc": "",
         "albumCount": artist.get("albumSize") or len(albums),
         "musicCount": artist.get("musicSize") or len(songs),
         "songs": songs,
         "albums": albums,
     }
+
+
+def artist_profile(artist_id, cookie=""):
+    """歌手完整介绍和话题。主页简介只有一句，完整介绍和博客在这个接口里。"""
+    payload = request("/api/artist/introduction", {"id": int(artist_id)}, cookie=cookie)
+    parts = []
+    brief = (payload.get("briefDesc") or "").strip()
+    if brief:
+        parts.append(brief)
+    for item in payload.get("introduction") or []:
+        title = (item.get("ti") or "").strip()
+        body = (item.get("txt") or "").strip()
+        if not body:
+            continue
+        parts.append((title + "\n" if title else "") + body)
+    topics = []
+    for item in payload.get("topicData") or []:
+        title = (item.get("mainTitle") or item.get("title") or "").strip()
+        summary = (item.get("summary") or "").strip()
+        if not title and not summary:
+            continue
+        topics.append({
+            "id": item.get("id"),
+            "title": title,
+            "summary": summary,
+            "when": _date(item.get("addTime")),
+            "cover": item.get("rectanglePicUrl") or item.get("coverUrl") or "",
+            "read": item.get("readCount") or 0,
+        })
+    return {"desc": "\n\n".join(parts), "topics": topics}
 
 
 def artist_songs(artist_id, cookie="", limit=50):
@@ -895,10 +926,10 @@ def artist_songs(artist_id, cookie="", limit=50):
     return _mark_playable([_song(item) for item in songs], cookie)
 
 
-def artist_albums(artist_id, cookie="", limit=12):
+def artist_albums(artist_id, cookie="", limit=100, offset=0):
     payload = request(
         "/api/artist/albums/" + str(int(artist_id)),
-        {"limit": limit, "offset": 0},
+        {"limit": limit, "offset": offset},
         cookie=cookie,
     )
     albums = []
@@ -908,6 +939,7 @@ def artist_albums(artist_id, cookie="", limit=12):
             "name": item.get("name") or "专辑",
             "cover": item.get("picUrl") or "",
             "publish": _date(item.get("publishTime")),
+            "size": item.get("size") or 0,
         })
     return albums
 
@@ -1040,6 +1072,7 @@ def _playlist(item):
         "cover": item.get("coverImgUrl") or "",
         "count": item.get("trackCount") or 0,
         "creator": creator.get("userId") or item.get("userId"),
+        "creatorName": creator.get("nickname") or "",
         "mine": bool(item.get("mine")),
         "special": item.get("specialType") or 0,
         "added": item.get("createTime") or 0,

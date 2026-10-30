@@ -28,11 +28,14 @@ sudo apt install python3 python3-pyqt5 python3-pyqt5.qtquick \
 
 ## 打包
 
+打包配置兼容 Qt 5.12 / Pillow 7 / debhelper 12 起的 Debian 系发行版，包括麒麟 Linux 10.1；更新发行版也可以使用同一份源码打包。先安装构建依赖：
+
 ```sh
+sudo apt install build-essential debhelper python3-pil
 dpkg-buildpackage -us -uc -b
 ```
 
-当前版本是 1.3.4。产物是 `Architecture: all` 的 deb。安装：
+当前版本是 1.3.5。产物是 `Architecture: all` 的 deb。安装：
 
 ```sh
 sudo apt install ./netease-music-linux_*_all.deb

@@ -291,6 +291,10 @@ def main():
     _use_glib_bus()
     if _raise_running():
         return 0
+    # 必须在创建 QGuiApplication 之前。否则窗口按 96 DPI 画，
+    # 144 DPI 的屏幕上字号、图标和间距都会比系统里别的窗口小一截。
+    QGuiApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
+    QGuiApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
     app = QGuiApplication(sys.argv)
     app.setApplicationName("netease-music")
     app.setDesktopFileName("netease-music-linux")
@@ -309,6 +313,7 @@ def main():
     context.setContextProperty("cardList", bridge.cards)
     context.setContextProperty("songList", bridge.songs)
     context.setContextProperty("albumList", bridge.albums)
+    context.setContextProperty("eventList", bridge.events)
     context.setContextProperty("commentList", bridge.comments)
     context.setContextProperty("downloadList", bridge.downloads)
     context.setContextProperty("queueList", bridge.queue)
@@ -320,6 +325,7 @@ def main():
         return 1
     window = engine.rootObjects()[0]
     app.setProperty("playerWindow", window)
+    bridge.bind_window(window)
     window.setWidth(size[0])
     window.setHeight(size[1])
     area = _work_area()

@@ -46,9 +46,26 @@ class DictListModel(QAbstractListModel):
         if not (0 <= row < len(self._rows)) or self._rows[row].get(name) == value:
             return
         self._rows[row][name] = value
+        self._emit_row(row, (name,))
+
+    def set_fields(self, updates):
+        """同一行的几个字段一次通知。封面回写时不要一行发两次刷新。"""
+        touched = {}
+        for row, name, value in updates:
+            if not (0 <= row < len(self._rows)) or self._rows[row].get(name) == value:
+                continue
+            self._rows[row][name] = value
+            touched.setdefault(row, []).append(name)
+        for row, names in touched.items():
+            self._emit_row(row, names)
+
+    def _emit_row(self, row, names):
         index = self.index(row, 0)
-        role = next((key for key, raw in self._roles.items() if bytes(raw).decode() == name), None)
-        roles = [role] if role is not None else []
+        roles = []
+        for name in names:
+            role = next((key for key, raw in self._roles.items() if bytes(raw).decode() == name), None)
+            if role is not None:
+                roles.append(role)
         self.dataChanged.emit(index, index, roles)
 
     def append(self, rows):

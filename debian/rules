@@ -31,3 +31,6 @@ override_dh_auto_install:
 
 override_dh_auto_test:
 	python3 -m py_compile player.py netease_api.py qt/*.py
+
+override_dh_auto_clean:
+	rm -rf debian/icons

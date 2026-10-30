@@ -53,6 +53,7 @@ class AppBridge(QObject):
     lyricChanged = pyqtSignal(str)
     deskLyricChanged = pyqtSignal(bool)
     detailChanged = pyqtSignal(str)
+    artistTabChanged = pyqtSignal(str)
     playlistMetaChanged = pyqtSignal(str)
     loginKeyChanged = pyqtSignal(str)
     qualitiesChanged = pyqtSignal(str)
@@ -69,9 +70,10 @@ class AppBridge(QObject):
         self.songs = DictListModel(("songId", "name", "artist", "artistId", "artists", "album", "albumId", "cover", "local", "duration", "vip", "playable"))
         self.queue = DictListModel(("songId", "name", "artist", "cover", "duration", "playable"))
         self.nav = DictListModel(("key", "label", "kind", "section", "cover", "local", "owned"))
-        self.cards = DictListModel(("itemId", "name", "cover", "local", "count", "kind", "creator"))
+        self.cards = DictListModel(("itemId", "name", "cover", "local", "count", "kind", "creator", "creatorId"))
         self.collects = DictListModel(("itemId", "name", "cover", "local", "count", "kind"))
-        self.albums = DictListModel(("itemId", "name", "cover", "local", "publish"))
+        self.albums = DictListModel(("itemId", "name", "cover", "local", "publish", "size"))
+        self.events = DictListModel(("title", "summary", "when", "cover", "local", "read"))
         self.comments = DictListModel(("nickname", "userId", "avatar", "local", "content", "when", "liked", "hot"))
         self.downloads = DictListModel(("name", "status", "quality", "path"))
         self._cookie = ""
@@ -87,6 +89,9 @@ class AppBridge(QObject):
         self._history = []
         self._detail_text = ""
         self._detail_cover = ""
+        self._artist_id = ""
+        self._artist_tab = "songs"
+        self._artist_desc_loaded = False
         self._loading_pos = False
         self._ui_playing = False
         self._volume = self._saved_volume()
@@ -127,6 +132,9 @@ class AppBridge(QObject):
         self._clock.start()
         self._lyric_sync_at = 0.0
         self._uiReady.connect(self._drain_ui, Qt.QueuedConnection)
+        self._window = None
+        self._pending_window = {}
+        self._bind_window_signals()
         self._fill_nav()
         self.historyChanged.emit("\n".join(self._load_search_history()))
         self.accountChanged.emit("登录")
@@ -138,6 +146,64 @@ class AppBridge(QObject):
         self._restore_state()
         if self._desk_lyric_wanted():
             self._launch_desk_lyric()
+
+    def bind_window(self, window):
+        """界面信号改写成窗口属性。Connections 的两种写法分别只认 Qt 5.12 或 5.15。"""
+        self._window = window
+        pending = self._pending_window
+        self._pending_window = {}
+        for name, value in pending.items():
+            window.setProperty(name, value)
+
+    def _bind_window_signals(self):
+        pairs = (
+            (self.statusChanged, "bridgeStatus"),
+            (self.suggestChanged, "bridgeSuggest"),
+            (self.stateChanged, "bridgeState"),
+            (self.clockChanged, "bridgeClock"),
+            (self.songChanged, "bridgeSong"),
+            (self.accountChanged, "bridgeAccount"),
+            (self.modeChanged, "bridgeMode"),
+            (self.qualityChanged, "bridgeQuality"),
+            (self.coverChanged, "bridgeCover"),
+            (self.detailChanged, "bridgeDetail"),
+            (self.lyricChanged, "bridgeLyric"),
+            (self.artistTabChanged, "bridgeArtistTab"),
+            (self.historyChanged, "bridgeHistory"),
+            (self.loginKeyChanged, "bridgeLoginKey"),
+            (self.qualitiesChanged, "bridgeQualities"),
+            (self.currentSongChanged, "bridgeCurrentSong"),
+            (self.playlistMetaChanged, "bridgePlaylistMeta"),
+        )
+        for signal, prop in pairs:
+            signal.connect(
+                lambda value, name=prop: self._write_window(name, value),
+                Qt.QueuedConnection,
+            )
+        self.pageChanged.connect(
+            lambda name, title: self._write_window("bridgePage", f"{name}\n{title}"),
+            Qt.QueuedConnection,
+        )
+        self.rateChanged.connect(
+            lambda value: self._write_window("bridgeRate", value),
+            Qt.QueuedConnection,
+        )
+        self.volumeChanged.connect(
+            lambda value: self._write_window("bridgeVolume", value),
+            Qt.QueuedConnection,
+        )
+        self.likedChanged.connect(
+            lambda value: self._write_window("bridgeLiked", "1" if value else "0"),
+            Qt.QueuedConnection,
+        )
+
+    def _write_window(self, name, value):
+        text = "" if value is None else str(value)
+        window = self._window
+        if window is None:
+            self._pending_window[name] = text
+            return
+        window.setProperty(name, text)
 
     def _post(self, kind, payload):
         if not self._alive:
@@ -160,12 +226,20 @@ class AppBridge(QObject):
                 self._drop_song_row(*payload)
             elif kind == "albums":
                 self._apply_albums(payload)
+            elif kind == "events":
+                self.events.replace(payload)
+            elif kind == "artistDesc":
+                self._apply_artist_desc(payload)
             elif kind == "detail":
                 self._apply_detail(*payload)
             elif kind == "playlistMeta":
-                self.playlistMetaChanged.emit(
-                    f"{payload.get('owned') and 1 or 0}|{payload.get('collected') and 1 or 0}|{payload.get('special') or 0}"
-                )
+                self.playlistMetaChanged.emit("|".join((
+                    "1" if payload.get("owned") else "0",
+                    "1" if payload.get("collected") else "0",
+                    str(payload.get("special") or 0),
+                    str(payload.get("creator") or ""),
+                    str(payload.get("creatorName") or "").replace("|", " "),
+                )))
             elif kind == "queueNext":
                 songs, name = payload[0], payload[1]
                 append = payload[2] if len(payload) > 2 else False
@@ -235,6 +309,8 @@ class AppBridge(QObject):
                 self._paint_local(self.collects, "cover", batch)
             if target == "album":
                 self._paint_local(self.albums, "cover", batch)
+            if target == "event":
+                self._paint_local(self.events, "cover", batch)
             if target == "comment":
                 self._paint_local(self.comments, "avatar", batch)
             if target == "detail" and batch:
@@ -245,10 +321,13 @@ class AppBridge(QObject):
         found = {}
         for url, path, _target in batch:
             found[url] = path
+        updates = []
         for index, row in enumerate(model._rows):
             path = found.get(row.get(field))
-            if path:
-                model.set_field(index, "local", path)
+            if path and row.get("local") != path:
+                updates.append((index, "local", path))
+        if updates:
+            model.set_fields(updates)
 
     def _fill_nav(self):
         blank = {"cover": "", "local": "", "owned": False}
@@ -678,6 +757,7 @@ class AppBridge(QObject):
                 "count": 0,
                 "kind": "chart",
                 "creator": "",
+                "creatorId": "",
             })
         for item in playlists:
             rows.append({
@@ -687,7 +767,8 @@ class AppBridge(QObject):
                 "local": "",
                 "count": int(item.get("count") or 0),
                 "kind": "playlist",
-                "creator": "",
+                "creator": item.get("creatorName") or "",
+                "creatorId": str(item.get("creator") or ""),
             })
         self._post("cards", (rows, "推荐已更新"))
         self._queue_covers((item.get("cover") for item in rows), 148, "card")
@@ -751,6 +832,8 @@ class AppBridge(QObject):
             "owned": mine == "owned",
             "collected": mine == "collected" or bool(page.get("subscribed")),
             "special": int(page.get("special") or 0),
+            "creator": str(page.get("creator") or ""),
+            "creatorName": creator,
         }
         self._post("playlistMeta", self._playlist_meta)
         rows = self._song_rows(songs)
@@ -859,7 +942,7 @@ class AppBridge(QObject):
         pending = [url for url in urls if url]
         if not pending:
             return
-        workers = 3 if len(pending) > 8 else 1
+        workers = 2 if len(pending) > 12 else 1
 
         def run(chunk):
             ready = []
@@ -867,7 +950,7 @@ class AppBridge(QObject):
                 path = self._cache_cover(url, size, kind, post=False)
                 if path:
                     ready.append((url, path, kind))
-                if len(ready) >= 6:
+                if len(ready) >= 8:
                     self._post("cardLocal", ready)
                     ready = []
             if ready:
@@ -1139,6 +1222,7 @@ class AppBridge(QObject):
                 "count": int(item.get("count") or 0),
                 "kind": "playlist",
                 "creator": item.get("creatorName") or "",
+                "creatorId": str(item.get("creator") or ""),
             }
             for item in playlists
         ]
@@ -1171,12 +1255,11 @@ class AppBridge(QObject):
                 "count": int(item.get("count") or 0),
                 "kind": "playlist",
                 "creator": item.get("creatorName") or "",
+                "creatorId": str(item.get("creator") or ""),
             }
             for item in playlists
         ], f"热门歌单 {len(playlists)} 个"))
-        for item in playlists:
-            if item.get("cover"):
-                threading.Thread(target=self._cache_cover, args=(item["cover"], 120, "card"), daemon=True).start()
+        self._queue_covers((item.get("cover") for item in playlists), 120, "card")
 
     def _search(self, keyword, token):
         try:
@@ -1207,11 +1290,34 @@ class AppBridge(QObject):
         if not artist_id or artist_id in ("0", "None"):
             self.statusChanged.emit(f"{name or '这个歌手'} 没有可打开的主页")
             return
+        self._artist_id = artist_id
+        self._artist_desc_loaded = False
+        # 点开歌手先看热门歌曲。主页、专辑和博客在分页里再取。
+        self._artist_tab = "songs"
+        self.artistTabChanged.emit("songs")
         self._show("artist", name or "歌手")
         token = self._begin_list()
         self.songs.replace([])
         self.albums.replace([])
+        self.events.replace([])
         threading.Thread(target=self._load_artist, args=(artist_id, token), daemon=True).start()
+
+    @pyqtSlot(str)
+    def setArtistTab(self, tab):
+        tab = tab if tab in ("home", "songs", "albums", "blog") else "songs"
+        if tab == self._artist_tab and self._page == "artist":
+            return
+        self._artist_tab = tab
+        self.artistTabChanged.emit(tab)
+        artist_id = self._artist_id
+        if not artist_id or self._page != "artist":
+            return
+        if tab == "home" and not self._artist_desc_loaded:
+            threading.Thread(target=self._load_artist_profile, args=(artist_id, self._list_token), daemon=True).start()
+        elif tab == "albums" and not self.albums._rows:
+            threading.Thread(target=self._load_artist_albums, args=(artist_id, self._list_token), daemon=True).start()
+        elif tab == "blog" and not self._artist_desc_loaded:
+            threading.Thread(target=self._load_artist_profile, args=(artist_id, self._list_token), daemon=True).start()
 
     def _load_artist(self, artist_id, token):
         try:
@@ -1222,7 +1328,7 @@ class AppBridge(QObject):
             return
         if token != self._list_token:
             return
-        brief = (data.get("brief") or "").strip()
+        brief = (data.get("brief") or data.get("desc") or "").strip()
         if len(brief) > 220:
             brief = brief[:220] + "…"
         counts = f"歌曲 {data.get('musicCount') or 0} · 专辑 {data.get('albumCount') or 0}"
@@ -1233,28 +1339,88 @@ class AppBridge(QObject):
             brief,
             data.get("avatar") or "",
         ))
-        self._post("albums", [
-            {
-                "itemId": str(item.get("id") or ""),
-                "name": item.get("name") or "专辑",
-                "cover": item.get("cover") or "",
-                "publish": item.get("publish") or "",
-            }
-            for item in data.get("albums") or []
-        ])
-        for item in data.get("albums") or []:
-            if item.get("cover"):
-                threading.Thread(target=self._cache_cover, args=(item["cover"], 96, "album"), daemon=True).start()
+        self._post("albums", self._album_rows(data.get("albums") or []))
+        self._cache_album_covers(data.get("albums") or [])
         songs = data.get("songs") or []
         rows = self._song_rows(songs)
         self._post_songs(
             rows,
-            f"{data.get('musicCount') or 0} 首歌曲 · {data.get('albumCount') or 0} 张专辑",
+            f"热门 {len(songs)} 首",
             len(songs),
             data.get("name") or "歌手",
             token=token,
         )
         self._cache_song_covers(rows)
+
+    def _load_artist_profile(self, artist_id, token):
+        try:
+            profile = api.artist_profile(artist_id, cookie=self._cookie)
+        except api.ApiError:
+            return
+        if token != self._list_token or artist_id != self._artist_id:
+            return
+        self._artist_desc_loaded = True
+        self._post("artistDesc", profile.get("desc") or "")
+        topics = profile.get("topics") or []
+        self._post("events", [
+            {
+                "title": item.get("title") or "",
+                "summary": item.get("summary") or "",
+                "when": item.get("when") or "",
+                "cover": item.get("cover") or "",
+                "local": "",
+                "read": str(item.get("read") or 0),
+            }
+            for item in topics
+        ])
+        self._queue_covers((item.get("cover") for item in topics), 96, "event")
+
+    def _apply_artist_desc(self, text):
+        parts = (self._detail_text or "").split("\n", 2)
+        name = parts[0] if parts else ""
+        sub = parts[1] if len(parts) > 1 else ""
+        self._detail_text = "\n".join((name, sub, text or ""))
+        self.detailChanged.emit(self._detail_text)
+
+    def _load_artist_albums(self, artist_id, token):
+        albums = []
+        offset = 0
+        while offset < 500:
+            try:
+                batch = api.artist_albums(artist_id, cookie=self._cookie, limit=100, offset=offset)
+            except api.ApiError as exc:
+                if token == self._list_token and not albums:
+                    self.statusChanged.emit(str(exc))
+                break
+            if token != self._list_token or artist_id != self._artist_id:
+                return
+            if not batch:
+                break
+            albums.extend(batch)
+            if len(batch) < 100:
+                break
+            offset += len(batch)
+        if token != self._list_token or artist_id != self._artist_id:
+            return
+        self._post("albums", self._album_rows(albums))
+        self._cache_album_covers(albums)
+        self._post("status", f"{len(albums)} 张专辑")
+
+    @staticmethod
+    def _album_rows(albums):
+        return [
+            {
+                "itemId": str(item.get("id") or ""),
+                "name": item.get("name") or "专辑",
+                "cover": item.get("cover") or "",
+                "publish": item.get("publish") or "",
+                "size": str(item.get("size") or ""),
+            }
+            for item in albums
+        ]
+
+    def _cache_album_covers(self, albums):
+        self._queue_covers((item.get("cover") for item in albums), 96, "album")
 
     @pyqtSlot(str, str)
     def openAlbum(self, album_id, name):
@@ -1403,7 +1569,9 @@ class AppBridge(QObject):
         self._lyrics = []
         self._lyric_words = []
         self.lyricChanged.emit("")
-        self._publish_desk_lyric(kept, song.get("name") or "歌词加载中…")
+        # 整首先清掉。新歌词还没到时，桌面歌词不能继续按上一首的时间轴往前走。
+        self._publish_track()
+        self._publish_desk_lyric(kept, "歌词加载中…")
         self._show_cover(song)
         cached = cache_lookup(song["songId"], self._quality)
         if cached:
@@ -1823,11 +1991,33 @@ class AppBridge(QObject):
         if not self._alive or not url:
             return ""
         try:
+            from io import BytesIO
+            from PIL import Image
             from player import cover_cache_path, _https_media_url
             import urllib.parse
             import urllib.request
             path = cover_cache_path(url, size)
-            if not os.path.exists(path) or os.path.getsize(path) < 32:
+
+            def write_jpeg(image):
+                # 路径是 .jpg。Qt 5.12 按后缀选解码器，内容必须真的是 JPEG。
+                tmp = f"{path}.{threading.get_ident()}.part"
+                try:
+                    image.convert("RGB").save(tmp, format="JPEG", quality=85)
+                    os.replace(tmp, path)
+                finally:
+                    try:
+                        os.remove(tmp)
+                    except OSError:
+                        pass
+
+            cached = os.path.exists(path) and os.path.getsize(path) >= 32
+            if cached:
+                try:
+                    with open(path, "rb") as handle:
+                        cached = handle.read(3) == b"\xff\xd8\xff"
+                except OSError:
+                    cached = False
+            if not cached:
                 safe = _https_media_url(url)
                 parsed = urllib.parse.urlparse(safe)
                 query = dict(urllib.parse.parse_qsl(parsed.query, keep_blank_values=True))
@@ -1840,17 +2030,16 @@ class AppBridge(QObject):
                     data = resp.read(2 * 1024 * 1024 + 1)
                 if len(data) > 2 * 1024 * 1024:
                     raise OSError("封面过大")
-                tmp = path + ".part"
-                with open(tmp, "wb") as handle:
-                    handle.write(data)
-                os.replace(tmp, path)
+                with Image.open(BytesIO(data)) as image:
+                    image.load()
+                    write_jpeg(image)
             if not self._alive:
                 return ""
             if not post:
                 return path
             if kind == "song":
                 self.coverChanged.emit(path)
-            elif kind in ("card", "nav", "songrow", "collect", "detail", "album", "comment"):
+            elif kind in ("card", "nav", "songrow", "collect", "detail", "album", "comment", "event"):
                 self._post("cardLocal", (url, path, kind))
             return path
         except (OSError, ValueError):
@@ -2056,6 +2245,7 @@ class AppBridge(QObject):
             text, start, end = line, 0, 1
         playing = self.player.want() == "playing" and not self._loading_pos and not self.player._seek_target
         payload = {
+            "id": str((self._song or {}).get("songId") or ""),
             "line": text,
             "start": int(start),
             "end": int(end),
@@ -2068,6 +2258,7 @@ class AppBridge(QObject):
         previous = self._desk_lyric_payload
         if (
             previous
+            and previous.get("id") == payload["id"]
             and previous.get("line") == text
             and previous.get("playing") == playing
             and previous.get("words") == payload.get("words")
