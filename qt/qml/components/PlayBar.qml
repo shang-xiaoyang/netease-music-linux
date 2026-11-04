@@ -1,6 +1,7 @@
 import QtQuick 2.12
 import QtQuick.Controls 2.12
 import QtQuick.Layouts 1.12
+import QtGraphicalEffects 1.12
 
 Rectangle {
     id: bar
@@ -245,7 +246,39 @@ Rectangle {
         spacing: 2
         IconButton { iconName: bar.modeKind() === "shuffle" ? "media-playlist-shuffle-symbolic" : bar.modeKind() === "single" ? "media-playlist-repeat-one-symbolic" : bar.modeKind() === "order" ? "media-playlist-consecutive-symbolic" : "media-playlist-repeat-symbolic"; tip: bar.mode; onClicked: bar.cycleMode() }
         IconButton { iconName: "media-skip-backward-symbolic"; tip: "上一首"; onClicked: bar.previousTrack() }
-        IconButton { iconName: bar.playing ? "media-playback-pause-symbolic" : "media-playback-start-symbolic"; tip: bar.playing ? "暂停" : "播放"; size: 20; onClicked: bar.togglePlay() }
+        Rectangle {
+            width: 36
+            height: 36
+            radius: 18
+            color: playHover.containsMouse ? "#D73333" : "#EC4141"
+            anchors.verticalCenter: parent.verticalCenter
+            Image {
+                id: playGlyph
+                anchors.centerIn: parent
+                width: 18
+                height: 18
+                source: "image://icon/" + (bar.playing ? "media-playback-pause-symbolic" : "media-playback-start-symbolic")
+                sourceSize: Qt.size(18, 18)
+                visible: false
+            }
+            ColorOverlay {
+                anchors.centerIn: parent
+                width: playGlyph.width
+                height: playGlyph.height
+                source: playGlyph
+                color: "#FFFFFF"
+            }
+            MouseArea {
+                id: playHover
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: bar.togglePlay()
+                ToolTip.visible: containsMouse
+                ToolTip.text: bar.playing ? "暂停" : "播放"
+                ToolTip.delay: 400
+            }
+        }
         IconButton { iconName: "media-skip-forward-symbolic"; tip: "下一首"; onClicked: bar.nextTrack() }
         IconButton { iconName: "view-list-symbolic"; tip: "播放列表"; onClicked: bar.showQueue() }
     }

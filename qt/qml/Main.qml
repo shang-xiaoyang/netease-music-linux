@@ -45,6 +45,8 @@ ApplicationWindow {
     property string pageTitle: "推荐"
     property int listReset: 0
     property bool playing: false
+    property bool buffering: false
+    property bool clockLive: false
     property bool liked: false
     property string songTitle: "未在播放"
     property string songArtist: ""
@@ -113,14 +115,40 @@ ApplicationWindow {
     onBridgeStatusChanged: status.text = bridgeStatus
     onBridgeSuggestChanged: window.suggestText = bridgeSuggest || ""
     onBridgeStateChanged: {
-        window.playing = bridgeState === "playing"
+        // 缓冲只停进度和歌词。按钮保持暂停键，缓冲够了会自动接着播。
+        if (bridgeState === "buffering") {
+            window.buffering = true
+            window.clockLive = false
+        } else {
+            window.buffering = false
+            window.playing = bridgeState === "playing"
+            if (!window.playing)
+                window.clockLive = false
+        }
         window.positionAnchor = window.position
         window.positionAt = Date.now()
     }
     onBridgeClockChanged: {
         var parts = bridgeClock.split(",")
-        window.position = Number(parts[0])
-        window.duration = Number(parts[1])
+        var next = Number(parts[0])
+        var total = Number(parts[1])
+        // 缓冲没稳时管道会先报一个很靠后的位置再跳回来。只在播放中丢掉这种回跳，
+        // 暂停和拖动必须照实停住，否则进度条和歌词会对不上。
+        if (window.playing && window.position > 8000 && next + 3000 < window.position && next < 8000)
+            next = window.position
+        if (total > 0)
+            window.duration = total
+        // 没出声时进度是 0。这时不能按整首时长自己往前走，否则没有声音进度条也在跑。
+        if (!window.playing || window.buffering || next <= 0) {
+            window.clockLive = false
+            if (!window.playing)
+                window.position = next
+            window.positionAnchor = window.position
+            window.positionAt = Date.now()
+            return
+        }
+        window.clockLive = true
+        window.position = next
         window.positionAnchor = window.position
         window.positionAt = Date.now()
     }
@@ -136,8 +164,9 @@ ApplicationWindow {
             window.position = 0
             window.positionAnchor = 0
             window.positionAt = Date.now()
+            window.clockLive = false
         }
-        window.playing = false
+        // 按钮只跟 bridgeState。换歌信号到得比暂停信号晚，这里再写 false 会把已经在播的图标打回暂停。
     }
     onBridgePageChanged: {
         var parts = bridgePage.split("\n")
@@ -453,7 +482,7 @@ ApplicationWindow {
                     height: kind === "section" ? 28 : 34
                     Rectangle {
                         anchors.fill: parent
-                        color: kind === "section" ? "transparent" : (mouse.containsMouse && !nav.moving ? "#E8F3FF" : (window.pageTitle === label ? "#FDECEC" : "transparent"))
+                        color: kind === "section" ? "transparent" : (window.pageTitle === label ? "#EC4141" : (mouse.containsMouse && !nav.moving ? "#F2F3F5" : "transparent"))
                     }
                     Row {
                         anchors.fill: parent
@@ -486,7 +515,7 @@ ApplicationWindow {
                         Label {
                             text: label
                             width: parent.width - (kind === "playlist" || kind === "chart" || kind === "liked" ? 24 : 0)
-                            color: window.pageTitle === label ? "#EC4141" : "#333333"
+                            color: window.pageTitle === label ? "#FFFFFF" : "#333333"
                             font.pixelSize: 13
                             elide: Text.ElideRight
                             anchors.verticalCenter: parent.verticalCenter
@@ -704,7 +733,7 @@ ApplicationWindow {
                     to: 360
                     duration: 18000
                     loops: Animation.Infinite
-                    running: window.playing && lyricStage.visible
+                    running: window.playing && !window.buffering && lyricStage.visible
                 }
                 Item {
                     id: tonearm
@@ -781,15 +810,18 @@ ApplicationWindow {
                     model: window.lyricText === "" ? ["0\t歌词加载中…"] : window.lyricText.split("\n")
                     cacheBuffer: 240
                     property int lineAt: {
-                        // 新歌词还没到时只有占位行。这时不能拿上一首残留的进度去对，否则会来回停在同一行。
-                        if (window.lyricText === "")
+                        // 歌词页没打开时不算。打开后从上一句接着找，不每次把整首重扫一遍。
+                        if (!lyricStage.visible || window.lyricText === "")
                             return 0
                         var lines = model
-                        var at = 0
-                        for (var i = 0; i < lines.length; i++) {
-                            var ms = Number(String(lines[i]).split("\t")[0])
-                            if (!isNaN(ms) && ms <= window.position)
-                                at = i
+                        var start = Math.max(0, currentIndex)
+                        var ms = Number(String(lines[start]).split("\t")[0])
+                        var at = (!isNaN(ms) && ms <= window.position) ? start : 0
+                        for (var i = at; i < lines.length; i++) {
+                            ms = Number(String(lines[i]).split("\t")[0])
+                            if (isNaN(ms) || ms > window.position)
+                                break
+                            at = i
                         }
                         return at
                     }
@@ -1504,7 +1536,32 @@ ApplicationWindow {
                                         Layout.fillWidth: true
                                         elide: Text.ElideRight
                                     }
-                                    Label { text: model.artist || ""; color: "#8E8E93"; Layout.preferredWidth: 140; elide: Text.ElideRight }
+                                    Label {
+                                        text: model.artist || ""
+                                        color: model.artistId ? "#507DAF" : "#8E8E93"
+                                        Layout.preferredWidth: 140
+                                        elide: Text.ElideRight
+                                        MouseArea {
+                                            anchors.fill: parent
+                                            enabled: model.artistId !== ""
+                                            hoverEnabled: enabled
+                                            cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                                            onClicked: appBridge.openArtist(model.artistId, model.artist)
+                                        }
+                                    }
+                                    Label {
+                                        text: model.album || ""
+                                        color: model.albumId ? "#507DAF" : "#8E8E93"
+                                        Layout.preferredWidth: 140
+                                        elide: Text.ElideRight
+                                        MouseArea {
+                                            anchors.fill: parent
+                                            enabled: model.albumId !== ""
+                                            hoverEnabled: enabled
+                                            cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                                            onClicked: appBridge.openAlbum(model.albumId, model.album)
+                                        }
+                                    }
                                     Label { text: clock(model.duration); color: "#8E8E93"; Layout.preferredWidth: 48 }
                                 }
                             }
@@ -1623,7 +1680,19 @@ ApplicationWindow {
                                     }
                                 }
                                 Label { text: model.name || ""; Layout.fillWidth: true; elide: Text.ElideRight; color: "#333333" }
-                                Label { text: model.artist || ""; color: "#8E8E93"; Layout.preferredWidth: 140; elide: Text.ElideRight }
+                                Label {
+                                    text: model.artist || ""
+                                    color: model.artistId ? "#507DAF" : "#8E8E93"
+                                    Layout.preferredWidth: 140
+                                    elide: Text.ElideRight
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        enabled: model.artistId !== ""
+                                        hoverEnabled: enabled
+                                        cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                                        onClicked: appBridge.openArtist(model.artistId, model.artist)
+                                    }
+                                }
                                 Label { text: clock(model.duration); color: "#8E8E93"; Layout.preferredWidth: 48 }
                             }
                         }
@@ -1760,6 +1829,58 @@ ApplicationWindow {
                                         wrapMode: Text.Wrap
                                         width: parent.width - 32
                                     }
+                                    Label {
+                                        text: "相关歌单"
+                                        color: "#222222"
+                                        font.pixelSize: 14
+                                        font.bold: true
+                                        topPadding: 8
+                                        visible: artistPlaylistFlow.visible
+                                    }
+                                    Flow {
+                                        id: artistPlaylistFlow
+                                        width: parent.width - 32
+                                        spacing: 12
+                                        visible: artistPlaylists.count > 0
+                                        Repeater {
+                                            id: artistPlaylists
+                                            model: window.cardModel
+                                            delegate: Item {
+                                                width: 108
+                                                height: 148
+                                                Column {
+                                                    spacing: 4
+                                                    Rectangle {
+                                                        width: 108
+                                                        height: 108
+                                                        radius: 8
+                                                        color: "#F3D6D6"
+                                                        clip: true
+                                                        Image {
+                                                            anchors.fill: parent
+                                                            source: local ? Qt.resolvedUrl("file://" + local) : ""
+                                                            sourceSize: Qt.size(108, 108)
+                                                            fillMode: Image.PreserveAspectCrop
+                                                            asynchronous: true
+                                                            cache: false
+                                                        }
+                                                    }
+                                                    Label {
+                                                        text: name
+                                                        width: 108
+                                                        elide: Text.ElideRight
+                                                        color: "#222222"
+                                                        font.pixelSize: 12
+                                                    }
+                                                }
+                                                MouseArea {
+                                                    anchors.fill: parent
+                                                    cursorShape: Qt.PointingHandCursor
+                                                    onClicked: appBridge.openPlaylist(itemId, name)
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
                             }
                             Column {
@@ -1815,6 +1936,19 @@ ApplicationWindow {
                                                 color: model.songId === window.currentSongId ? "#EC4141" : "#333333"
                                                 Layout.fillWidth: true
                                                 elide: Text.ElideRight
+                                            }
+                                            Label {
+                                                text: model.artist || ""
+                                                color: model.artistId ? "#507DAF" : "#8E8E93"
+                                                Layout.preferredWidth: 140
+                                                elide: Text.ElideRight
+                                                MouseArea {
+                                                    anchors.fill: parent
+                                                    enabled: model.artistId !== ""
+                                                    hoverEnabled: enabled
+                                                    cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                                                    onClicked: appBridge.openArtist(model.artistId, model.artist)
+                                                }
                                             }
                                             Label {
                                                 text: model.album || ""
@@ -2125,16 +2259,23 @@ ApplicationWindow {
                 }
                 Component {
                     id: userPage
-                Item {
+                Flickable {
                     Layout.fillWidth: true
                     Layout.fillHeight: true
+                    contentWidth: width
+                    contentHeight: userColumn.implicitHeight + 24
+                    clip: true
+                    boundsBehavior: Flickable.StopAtBounds
+                    ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+                    Column {
+                        id: userColumn
+                        width: parent.width
+                        spacing: 12
                     Row {
-                        anchors.left: parent.left
-                        anchors.top: parent.top
-                        anchors.leftMargin: 16
-                        anchors.topMargin: 16
-                        anchors.right: parent.right
-                        anchors.rightMargin: 16
+                        leftPadding: 16
+                        topPadding: 16
+                        rightPadding: 16
+                        width: parent.width
                         spacing: 18
                         Rectangle {
                             width: 96
@@ -2182,6 +2323,60 @@ ApplicationWindow {
                                 onClicked: Qt.openUrlExternally("https://music.163.com/v/w/vip")
                             }
                         }
+                    }
+                    Label {
+                        text: "歌单"
+                        color: "#222222"
+                        font.pixelSize: 14
+                        font.bold: true
+                        leftPadding: 16
+                        visible: userPlaylistFlow.visible
+                    }
+                    Flow {
+                        id: userPlaylistFlow
+                        width: parent.width - 32
+                        x: 16
+                        spacing: 12
+                        visible: userPlaylists.count > 0
+                        Repeater {
+                            id: userPlaylists
+                            model: window.cardModel
+                            delegate: Item {
+                                width: 108
+                                height: 148
+                                Column {
+                                    spacing: 4
+                                    Rectangle {
+                                        width: 108
+                                        height: 108
+                                        radius: 8
+                                        color: "#F3D6D6"
+                                        clip: true
+                                        Image {
+                                            anchors.fill: parent
+                                            source: local ? Qt.resolvedUrl("file://" + local) : ""
+                                            sourceSize: Qt.size(108, 108)
+                                            fillMode: Image.PreserveAspectCrop
+                                            asynchronous: true
+                                            cache: false
+                                        }
+                                    }
+                                    Label {
+                                        text: name
+                                        width: 108
+                                        elide: Text.ElideRight
+                                        color: "#222222"
+                                        font.pixelSize: 12
+                                    }
+                                }
+                                MouseArea {
+                                    anchors.fill: parent
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: appBridge.openPlaylist(itemId, name)
+                                }
+                            }
+                        }
+                    }
                     }
                 }
                 }
@@ -2301,7 +2496,7 @@ ApplicationWindow {
         z: 2
         Timer {
             interval: 500
-            running: window.playing && window.duration > 0
+            running: window.clockLive && window.playing && !window.buffering && window.duration > 0
             repeat: true
             onTriggered: {
                 var next = window.positionAnchor + (Date.now() - window.positionAt) * window.playRate

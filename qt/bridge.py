@@ -3,6 +3,7 @@
 """把现有接口和播放后端交给 QML。QML 只发意图，不直接请求网易。"""
 
 import json
+import logging
 import os
 import random
 import urllib.parse
@@ -21,10 +22,29 @@ if ROOT not in sys.path:
 import netease_api as api
 
 from qt.models import DictListModel
-from qt.paths import COOKIE_PATH, DATA_DIR, DOWNLOAD_INDEX, LYRIC_PATH, LYRIC_STATE_PATH, LYRIC_TRACK_PATH, RECENT_PATH, SEARCH_HISTORY_PATH, STATE_PATH, VOLUME_PATH, player_script
+from qt.paths import COOKIE_PATH, DATA_DIR, DOWNLOAD_INDEX, LOG_PATH, LYRIC_PATH, LYRIC_STATE_PATH, LYRIC_TRACK_PATH, RECENT_PATH, SEARCH_HISTORY_PATH, STATE_PATH, VOLUME_PATH, player_script
 from qt.playback_cache import lookup as cache_lookup
+from qt.playback_cache import network_down as cache_network_down
 from qt.playback_cache import store as cache_store
 from qt.player_backend import PlayerBackend, allowed_uri
+
+def _logger():
+    """每次运行都写到数据目录。出问题时不用再靠界面上那一行状态猜。"""
+    log = logging.getLogger("netease.qt")
+    if log.handlers:
+        return log
+    log.setLevel(logging.INFO)
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        handle = logging.FileHandler(LOG_PATH, encoding="utf-8")
+        handle.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+        log.addHandler(handle)
+    except OSError:
+        log.addHandler(logging.NullHandler())
+    return log
+
+
+LOG = _logger()
 
 MODES = ("loop", "order", "single", "shuffle")
 MODE_LABEL = {
@@ -65,7 +85,7 @@ class AppBridge(QObject):
         self.player = PlayerBackend()
         self.player.stateChanged.connect(self._on_player_state)
         self.player.positionChanged.connect(self._on_position)
-        self.player.errorChanged.connect(self.statusChanged)
+        self.player.errorChanged.connect(self._on_player_error)
         self.player.ended.connect(self._on_ended)
         self.songs = DictListModel(("songId", "name", "artist", "artistId", "artists", "album", "albumId", "cover", "local", "duration", "vip", "playable"))
         self.queue = DictListModel(("songId", "name", "artist", "cover", "duration", "playable"))
@@ -125,6 +145,10 @@ class AppBridge(QObject):
         self._ui_queue = []
         self._ui_lock = threading.Lock()
         self._alive = True
+        self._cache_job = None
+        self._cache_wake = threading.Event()
+        self._cache_worker_on = False
+        self._cache_net_down = False
         self._clock = QTimer(self)
         # 进度条自己按墙钟走。这一拍只校正漂移，并偶尔把桌面歌词的进度对一下。
         self._clock.setInterval(1000)
@@ -704,7 +728,16 @@ class AppBridge(QObject):
             self._history = self._history[-8:]
         self._page = name
         self._page_title = title
+        # 新页的数据还在路上。先把上一页的封面和简介清掉，避免慢加载时看起来像打开了旧内容。
+        if name in ("playlist", "album", "artist", "user"):
+            self._detail_text = "\n".join((title, "", ""))
+            self._detail_cover = ""
+            self.detailChanged.emit(self._detail_text)
+            self.detailChanged.emit("cover\n")
+            if name == "user":
+                self.cards.replace([])
         self.pageChanged.emit(name, title)
+        LOG.info("open page=%s title=%s", name, title)
 
     def _restore_frame(self, frame):
         self._list_token += 1
@@ -1341,6 +1374,7 @@ class AppBridge(QObject):
         ))
         self._post("albums", self._album_rows(data.get("albums") or []))
         self._cache_album_covers(data.get("albums") or [])
+        threading.Thread(target=self._load_artist_playlists, args=(artist_id, token), daemon=True).start()
         songs = data.get("songs") or []
         rows = self._song_rows(songs)
         self._post_songs(
@@ -1351,6 +1385,31 @@ class AppBridge(QObject):
             token=token,
         )
         self._cache_song_covers(rows)
+
+    def _load_artist_playlists(self, artist_id, token):
+        try:
+            playlists = api.artist_playlists(artist_id, cookie=self._cookie)
+        except api.ApiError as exc:
+            LOG.info("artist playlists failed id=%s %s", artist_id, exc)
+            return
+        if token != self._list_token or artist_id != self._artist_id:
+            return
+        rows = [
+            {
+                "itemId": str(item.get("id") or ""),
+                "name": item.get("name") or "歌单",
+                "cover": item.get("cover") or "",
+                "local": "",
+                "count": int(item.get("count") or 0),
+                "kind": "playlist",
+                "creator": item.get("creatorName") or "",
+                "creatorId": str(item.get("creator") or ""),
+            }
+            for item in playlists
+            if item.get("id")
+        ]
+        self._post("cards", (rows, f"相关歌单 {len(rows)} 个"))
+        self._queue_covers((item.get("cover") for item in rows), 120, "card")
 
     def _load_artist_profile(self, artist_id, token):
         try:
@@ -1549,6 +1608,7 @@ class AppBridge(QObject):
             return
         song = self._queue[index]
         self._index = index
+        LOG.info("play index=%s id=%s name=%s queue=%s", index, song.get("songId"), song.get("name"), len(self._queue))
         self._token += 1
         token = self._token
         self._song = song
@@ -1559,6 +1619,8 @@ class AppBridge(QObject):
             song["songId"], song["name"], song.get("artist") or "", song.get("cover") or "",
             str(int(song.get("duration") or 0)), self._artist_payload(song), song.get("album") or "",
         )))
+        # 歌名信号会晚于播放状态到达界面。先把按钮写成正在播放，避免被换歌处理盖成暂停。
+        self.stateChanged.emit("playing")
         if self._page == "lyric":
             self._page_title = song.get("name") or "歌词"
             self.pageChanged.emit("lyric", self._page_title)
@@ -1568,6 +1630,7 @@ class AppBridge(QObject):
         self.clockChanged.emit(f"{kept},{int(song.get('duration') or 0)}")
         self._lyrics = []
         self._lyric_words = []
+        self._clock_pos = kept
         self.lyricChanged.emit("")
         # 整首先清掉。新歌词还没到时，桌面歌词不能继续按上一首的时间轴往前走。
         self._publish_track()
@@ -1586,6 +1649,7 @@ class AppBridge(QObject):
             return
         self.statusChanged.emit(f"正在获取{api.QUALITY_LABEL.get(self._quality, '')}…")
         threading.Thread(target=self._start, args=(token, song), daemon=True).start()
+        threading.Thread(target=self._watch_stall, args=(token, song), daemon=True).start()
 
     def _start_cached(self, token, song):
         """声音已经从缓存开了。只补歌词，不再等播放地址。"""
@@ -1604,20 +1668,59 @@ class AppBridge(QObject):
         self._publish_track()
         self._publish_desk_lyric(self.player.position()[0] or int(getattr(self, "_resume_at", 0) or 0))
 
+    def _watch_stall(self, token, song):
+        """只在已经播到某个位置、又停在那里时才切歌。开头没出声、暂停、拖动进度都不算卡住。"""
+        stalled_at = 0.0
+        stalled_pos = None
+        while token == self._token:
+            time.sleep(1)
+            if token != self._token:
+                return
+            # 缓冲中声音是停着的。已经出过声就继续计时，大约 10 秒还补不回来再切。
+            # 开头还没出声、用户暂停、正在拖动，都不计。
+            if self.player.want() != "playing" or self.player._seek_target is not None or (self._loading_pos and not self.player._buffering):
+                stalled_at = 0.0
+                stalled_pos = None
+                continue
+            heard = self.player.heard()
+            if heard <= 0:
+                stalled_at = 0.0
+                stalled_pos = None
+                continue
+            if stalled_pos is None or abs(heard - stalled_pos) > 500:
+                stalled_pos = heard
+                stalled_at = time.time()
+                continue
+            # 缓存停不停都不切歌。只有声音自己停在一个位置，大约 10 秒还出不来，才切下一首。
+            if time.time() - stalled_at < 10:
+                continue
+            # 卡住时歌词停在这一句。界面不再按自己的时钟往前猜。
+            self._loading_pos = True
+            self._publish_desk_lyric(heard)
+            if token != self._token:
+                return
+            LOG.info("play stalled id=%s name=%s pos=%s", song.get("songId"), song.get("name"), heard)
+            self.statusChanged.emit(f"播放卡住，切换下一首：{song.get('name') or ''}")
+            self.next()
+            return
+
     def _start(self, token, song):
         try:
             info = api.song_url(song["songId"], level=self._quality, cookie=self._cookie)
-            original, translated, words = api.lyric_pair(song["songId"], cookie=self._cookie)
         except api.ApiError as exc:
             if token == self._token:
-                self.statusChanged.emit(str(exc))
+                LOG.info("play url failed id=%s %s", song.get("songId"), exc)
+                self.statusChanged.emit(f"{exc}，切换下一首")
                 self._loading_pos = False
+                self.next()
             return
         if token != self._token:
             return
         if not info or not allowed_uri(info.get("url")):
             self._loading_pos = False
-            self.statusChanged.emit("没有可播放地址")
+            LOG.info("play url missing id=%s", song.get("songId"))
+            self.statusChanged.emit("没有可播放地址，切换下一首")
+            self.next()
             return
         cached = cache_lookup(song["songId"], info.get("level") or self._quality)
         play_url = urllib.parse.urljoin("file:", urllib.request.pathname2url(cached)) if cached else info["url"]
@@ -1626,25 +1729,33 @@ class AppBridge(QObject):
         self._post("play", play_url)
         if resume_at <= 1500:
             self._loading_pos = False
-        if not cached:
-            threading.Thread(
-                target=self._store_cache,
-                args=(token, song["songId"], info.get("level") or self._quality, info.get("type") or "mp3", info["url"]),
-                daemon=True,
-            ).start()
         self._apply_volume()
         level = info.get("level") or self._quality
         self.qualityChanged.emit(api.QUALITY_LABEL.get(level, level))
+        label = api.QUALITY_LABEL.get(level, level)
+        note = "，已换成这首歌能播的档" if level != self._quality else ""
+        self.statusChanged.emit(f"正在播放 · {label}{note}")
+        # 歌词和整首缓存都在出声之后再取。歌词接口慢时不能挡着播放。
+        threading.Thread(target=self._load_lyric, args=(token, song), daemon=True).start()
+        threading.Thread(target=self._load_qualities, args=(token, song["songId"], info), daemon=True).start()
+        if not cached:
+            self._queue_cache(token, song["songId"], level, info.get("type") or "mp3", info["url"])
+
+    def _load_lyric(self, token, song):
+        """播放已经开始。歌词到了再补上，失败就留着“歌词加载中”。"""
+        try:
+            original, translated, words = api.lyric_pair(song["songId"], cookie=self._cookie)
+        except api.ApiError as exc:
+            LOG.info("lyric failed id=%s %s", song.get("songId"), exc)
+            return
+        if token != self._token:
+            return
         lines = api.merge_lrc(original, translated)
         self._lyrics = lines
         self._lyric_words = words
         self._post("lyric", "\n".join(f"{ms}\t{text}" for ms, text in lines) or "0\t这首歌没有歌词")
         self._publish_track()
         self._publish_desk_lyric(self.player.position()[0])
-        label = api.QUALITY_LABEL.get(level, level)
-        note = "，已换成这首歌能播的档" if level != self._quality else ""
-        self.statusChanged.emit(f"正在播放 · {label}{note}")
-        threading.Thread(target=self._load_qualities, args=(token, song["songId"], info), daemon=True).start()
 
     @pyqtSlot(int)
     def playNext(self, row):
@@ -1661,8 +1772,7 @@ class AppBridge(QObject):
             self.queue.replace(self._queue)
             self._play_index(0)
             return
-        insert_at = min(len(self._queue), max(0, self._index) + 1)
-        self._queue.insert(insert_at, song)
+        self._place_next(song)
         self.queue.replace(self._queue)
         self.statusChanged.emit(f"下一首播放 {song.get('name') or ''}")
 
@@ -1721,8 +1831,36 @@ class AppBridge(QObject):
         ]
         self._post("queueNext", (songs, name, bool(skip)))
 
+    def _place_next(self, song):
+        """同一首歌只留一条，并放到当前这首的后面。"""
+        song_id = str(song.get("songId") or "")
+        playing_id = str((self._song or {}).get("songId") or "")
+        kept = [item for item in self._queue if str(item.get("songId") or "") != song_id]
+        if playing_id and playing_id != song_id:
+            at = next((i for i, item in enumerate(kept) if str(item.get("songId") or "") == playing_id), len(kept) - 1)
+            at = min(len(kept), at + 1)
+        else:
+            at = 0
+        kept.insert(at, song)
+        self._queue = kept
+        if playing_id:
+            found = next((i for i, item in enumerate(kept) if str(item.get("songId") or "") == playing_id), None)
+            if found is not None:
+                self._index = found
+
+    def _unique_songs(self, songs):
+        seen = set()
+        rows = []
+        for item in songs:
+            song_id = str(item.get("songId") or "")
+            if not song_id or song_id in seen:
+                continue
+            seen.add(song_id)
+            rows.append(dict(item))
+        return rows
+
     def _queue_songs_next(self, songs, name, append=False):
-        songs = [dict(item) for item in songs if item.get("songId")]
+        songs = self._unique_songs(songs)
         if not songs:
             if not append:
                 self.statusChanged.emit("没有可播放的歌曲")
@@ -1730,14 +1868,36 @@ class AppBridge(QObject):
         if not self._queue:
             self._queue = songs
             self.queue.replace(self._queue)
+            LOG.info("queue start %s songs=%s", name, len(songs))
             self._play_index(0)
             return
+        playing_id = str((self._song or {}).get("songId") or "")
         if append:
             insert_at = len(self._queue)
         else:
-            insert_at = min(len(self._queue), max(0, self._index) + 1)
+            insert_at = next(
+                (i for i, item in enumerate(self._queue) if str(item.get("songId") or "") == playing_id),
+                self._index,
+            ) + 1
+            insert_at = min(len(self._queue), max(0, insert_at))
+        existing = {str(item.get("songId") or "") for item in self._queue}
+        songs = [item for item in songs if str(item.get("songId") or "") not in existing]
+        if not songs:
+            self.statusChanged.emit(f"「{name}」里的歌已经在播放列表中")
+            return
         self._queue[insert_at:insert_at] = songs
+        if playing_id:
+            found = next(
+                (i for i, item in enumerate(self._queue) if str(item.get("songId") or "") == playing_id),
+                None,
+            )
+            if found is not None:
+                self._index = found
         self.queue.replace(self._queue)
+        LOG.info(
+            "queue insert %s songs=%s at=%s index=%s playing=%s",
+            name, len(songs), insert_at, self._index, playing_id,
+        )
         if append:
             self.statusChanged.emit(f"「{name}」又加入 {len(songs)} 首")
         else:
@@ -1868,13 +2028,21 @@ class AppBridge(QObject):
         # 跟播放按钮用同一个状态。内部“想播放”在出声前就会置上，不能拿它判断能不能暂停。
         if self._ui_playing:
             held = self.player.position()[0]
+            self._clock_pos = held
             self.player.pause()
+            self.clockChanged.emit(f"{held},{int((self._song or {}).get('duration') or self.player.position()[1] or 0)}")
             self._publish_desk_lyric(held)
-            self.statusChanged.emit("已暂停")
+            if self._cache_net_down:
+                self.statusChanged.emit("已暂停，网络不可用")
+            elif self._cache_job:
+                self.statusChanged.emit("已暂停，继续缓存这首")
+            else:
+                self.statusChanged.emit("已暂停")
             return
         if self._song and self.player.has_source():
             held = self.player.position()[0]
             if self.player.resume():
+                self._clock_pos = held
                 self._publish_desk_lyric(held)
                 self.statusChanged.emit("继续播放")
                 return
@@ -2485,13 +2653,18 @@ class AppBridge(QObject):
         if not user_id:
             return
         self._show("user", name or "用户")
+        self._user_token = getattr(self, "_user_token", 0) + 1
         threading.Thread(target=self._load_user, args=(user_id, name), daemon=True).start()
 
     def _load_user(self, user_id, name):
+        token = getattr(self, "_user_token", 0)
         try:
             data = api.user_detail(user_id, cookie=self._cookie)
         except api.ApiError as exc:
+            LOG.info("user detail failed id=%s %s", user_id, exc)
             self._post("status", str(exc))
+            return
+        if token != getattr(self, "_user_token", 0):
             return
         brief = data.get("signature") or ""
         counts = f"关注 {data.get('follows') or 0} · 粉丝 {data.get('followers') or 0}"
@@ -2502,6 +2675,29 @@ class AppBridge(QObject):
             brief,
             data.get("avatar") or "",
         ))
+        try:
+            playlists = api.user_playlists(user_id, self._cookie)
+        except api.ApiError as exc:
+            LOG.info("user playlists failed id=%s %s", user_id, exc)
+            return
+        if token != getattr(self, "_user_token", 0):
+            return
+        rows = [
+            {
+                "itemId": str(item.get("id") or ""),
+                "name": item.get("name") or "歌单",
+                "cover": item.get("cover") or "",
+                "local": "",
+                "count": int(item.get("count") or 0),
+                "kind": "playlist",
+                "creator": item.get("creatorName") or "",
+                "creatorId": str(item.get("creator") or ""),
+            }
+            for item in playlists
+            if item.get("id")
+        ]
+        self._post("cards", (rows, f"{data.get('nickname') or name or '用户'} 的歌单 {len(rows)} 个"))
+        self._queue_covers((item.get("cover") for item in rows), 120, "card")
 
     @pyqtSlot(int)
     def enqueueDownload(self, row):
@@ -2706,6 +2902,7 @@ class AppBridge(QObject):
         self.clockChanged.emit(f"{position},{duration}")
         self.likedChanged.emit(song_id in self._liked)
         self._ui_playing = False
+        self._clock_pos = position
         self.stateChanged.emit("paused")
         self.qualityChanged.emit(api.QUALITY_LABEL.get(self._quality, self._quality))
         where = f" · {self._queue_title}" if self._queue_title else ""
@@ -2742,15 +2939,99 @@ class AppBridge(QObject):
         self._close_desk_lyric()
         self.player.stop()  # 退出时已在界面线程
 
-    def _store_cache(self, token, song_id, level, ext, url):
+    def _queue_cache(self, token, song_id, level, ext, url):
+        """记下要缓存的这一首。播放和暂停都接着下，换歌才停掉上一首。"""
         if not allowed_uri(url):
             return
-        try:
-            cache_store(song_id, level, ext, url)
-        except (OSError, ValueError):
+        old = self._cache_job
+        if old and old.get("cancel") is not None:
+            old["cancel"].set()
+        self._cache_job = {
+            "token": token,
+            "song_id": str(song_id),
+            "level": level,
+            "ext": ext,
+            "url": url,
+            "tries": 0,
+            "cancel": threading.Event(),
+            "progress": {"bytes": 0, "total": 0, "mark": 0},
+        }
+        self._cache_wake.set()
+        if self._cache_worker_on:
             return
-        if token == self._token:
-            self._post("status", "已缓存到本机，下次播放不再拉流")
+        self._cache_worker_on = True
+        threading.Thread(target=self._cache_worker, daemon=True).start()
+
+    def _network_up(self):
+        """探测网易云本身。能连上（哪怕返回错误页）说明不是本机网络断了。"""
+        req = urllib.request.Request(
+            "https://music.163.com/",
+            method="HEAD",
+            headers={"User-Agent": "netease-music-linux"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                return resp.status < 500
+        except urllib.error.HTTPError as exc:
+            return exc.code < 500
+        except (urllib.error.URLError, TimeoutError, ConnectionError, OSError):
+            return False
+
+    def _cache_worker(self):
+        while self._alive:
+            job = self._cache_job
+            if not job or (job.get("cancel") is not None and job["cancel"].is_set()):
+                if job and self._cache_job is job:
+                    self._cache_job = None
+                self._cache_wake.wait(1)
+                self._cache_wake.clear()
+                continue
+            if self._cache_net_down:
+                if self._network_up():
+                    self._cache_net_down = False
+                    if job.get("token") == self._token:
+                        self._post("status", "网络已恢复，继续缓存")
+                else:
+                    self._cache_wake.wait(3)
+                    self._cache_wake.clear()
+                    continue
+            if cache_lookup(job["song_id"], job["level"]):
+                if self._cache_job is job:
+                    self._cache_job = None
+                continue
+            try:
+                cache_store(
+                    job["song_id"], job["level"], job["ext"], job["url"],
+                    cancel=job["cancel"], progress=job["progress"],
+                )
+            except OSError as exc:
+                if job.get("cancel") is not None and job["cancel"].is_set():
+                    continue
+                text = str(exc)
+                if "已有缓存" in text:
+                    time.sleep(0.4)
+                    continue
+                if cache_network_down(exc):
+                    self._cache_net_down = True
+                    LOG.info("cache network id=%s %s", job["song_id"], text)
+                    if job.get("token") == self._token:
+                        self._post("status", "网络不可用，缓存已暂停")
+                    continue
+                job["tries"] += 1
+                LOG.info("cache failed id=%s %s", job["song_id"], text)
+                if job["tries"] < 3:
+                    time.sleep(2)
+                    continue
+                if self._cache_job is job:
+                    self._cache_job = None
+                if job.get("token") == self._token:
+                    self._post("status", "缓存失败，下次播放再试")
+                continue
+            LOG.info("cache stored id=%s level=%s", job["song_id"], job["level"])
+            if self._cache_job is job:
+                self._cache_job = None
+            if job.get("token") == self._token:
+                self._post("status", "已缓存到本机，下次播放不再拉流")
 
     def _share_url(self):
         song = self._song or {}
@@ -2805,9 +3086,30 @@ class AppBridge(QObject):
     def openLyric(self):
         self._show("lyric", (self._song or {}).get("name") or "歌词")
 
+    def _on_player_error(self, message):
+        text = str(message or "播放失败")
+        LOG.info("player error %s", text)
+        self.statusChanged.emit(text)
+        # 还没出声的失败留在这一首。只有已经播到某个位置才切，避免一加载就跳歌。
+        if self._queue and self._song and self.player.heard() > 0:
+            self.statusChanged.emit(f"{text}，切换下一首")
+            self._loading_pos = False
+            self.next()
+
     def _on_player_state(self, state):
+        if state == "buffering":
+            # 按钮仍是暂停键。进度和歌词先停住，数据回来再接着走。
+            self._loading_pos = True
+            self._publish_desk_lyric(self.player.position()[0])
+            self.stateChanged.emit("buffering")
+            self.statusChanged.emit("正在缓冲…")
+            LOG.info("player state=buffering pos=%s", self.player.position()[0])
+            return
         self._ui_playing = state == "playing"
         self.stateChanged.emit(state)
+        # 桌面歌词和界面歌词都看这个状态。只在按钮上改，暂停和真正出声会对不齐。
+        self._publish_desk_lyric(self.player.position()[0])
+        LOG.info("player state=%s pos=%s", state, self.player.position()[0])
 
     def _on_position(self, pos, dur):
         if self.player.want() != "playing":
@@ -2817,6 +3119,16 @@ class AppBridge(QObject):
         if target is not None and (not dur or abs(pos - target) > 1500):
             return
         self._loading_pos = False
+        # 还没出声时位置是 0。这时候发进度，界面会拿整首时长自己往前走。
+        if pos <= 0 or self.player._buffering:
+            return
+        # 进度贴到时长上时先不往外发。开播瞬间的误报会让界面以为这首已经唱完。
+        if dur and pos >= dur - 1500 and pos < 8000:
+            return
+        # 缓冲抖动会让位置在两句歌词之间来回跳。只接受往前走，或用户拖回开头。
+        if self._clock_pos and pos + 1500 < self._clock_pos and pos > 8000:
+            return
+        self._clock_pos = pos
         total = dur or int((self._song or {}).get("duration") or 0)
         self.clockChanged.emit(f"{pos},{total}")
         if self._desk_lyric_alive():
@@ -2825,16 +3137,45 @@ class AppBridge(QObject):
     def _on_ended(self):
         if getattr(self.player, "_held_pause", False):
             return
+        heard = self.player.heard()
+        song = self._song or {}
+        duration = int(song.get("duration") or 0)
+        # 本机缓存读完了，但还没到这首歌的时长，说明文件是截断的。删掉并重新缓存，不切下一首。
+        if duration and heard < duration - 3000 and self._drop_broken_cache(song):
+            LOG.info("cache short id=%s heard=%s duration=%s", song.get("songId"), heard, duration)
+            self.statusChanged.emit("缓存不完整，正在重新缓存")
+            self._resume_at = heard
+            self._play_index(self._index)
+            return
         self._step(1)
+
+    def _drop_broken_cache(self, song):
+        """只删除正在播放的那份本机缓存，并让索引下次不再命中它。"""
+        uri = urllib.parse.urlparse(str(getattr(self.player, "_uri", "") or ""))
+        if uri.scheme != "file":
+            return False
+        real = os.path.realpath(urllib.request.url2pathname(uri.path))
+        folder = os.path.realpath(os.path.join(os.path.expanduser("~/.cache"), "netease-cloud-music", "playback"))
+        if not real.startswith(folder + os.sep) or not os.path.isfile(real):
+            return False
+        try:
+            os.remove(real)
+        except OSError:
+            return False
+        # 文件已经没了。再查一次是为了把索引里的记录清掉。
+        cache_lookup(song.get("songId"), self._quality)
+        return True
 
     def _emit_clock(self):
         if self.player.want() != "playing":
             return
         if self.player is None:
             return
-        if self._loading_pos:
+        if self._loading_pos or self.player._buffering:
             return
         pos, dur = self.player.position()
+        if pos <= 0:
+            return
         self.clockChanged.emit(f"{pos},{dur or int((self._song or {}).get('duration') or 0)}")
         # 歌词窗口自己按时间切句。这里只偶尔对一次进度，避免暂停和拖动之后越走越偏。
         if self._desk_lyric_alive() and time.time() - getattr(self, "_lyric_sync_at", 0) >= 2.5:

@@ -4,9 +4,12 @@
 
 import json
 import os
+import threading
 import urllib.request
 
 LIMIT = 1024 * 1024 * 1024
+# 快到 1GB 时一次腾出 200MB，而不是顶满了才一点点删。
+HEADROOM = 200 * 1024 * 1024
 # 单首缓存不再往下读。母带再大也远小于这个值，异常响应不能写满磁盘。
 MAX_TRACK = 200 * 1024 * 1024
 CACHE_DIR = os.path.join(os.path.expanduser("~/.cache"), "netease-cloud-music", "playback")
@@ -39,6 +42,58 @@ def _safe_name(song_id, level, ext):
     return f"{song}-{level}.{ext}"
 
 
+def _complete(path):
+    """FLAC 必须有正常的帧头，并且不是下到一半的文件。MP3 只认文件头。"""
+    try:
+        with open(path, "rb") as handle:
+            head = handle.read(4)
+        if head == b"fLaC":
+            return _flac_frames(path)
+        if head[:3] == b"ID3" or (len(head) >= 2 and head[0] == 0xFF and head[1] & 0xE0 == 0xE0):
+            return True
+    except OSError:
+        return False
+    return False
+
+
+def _flac_frames(path):
+    """从元数据块走到第一帧。下到一半的文件走不到，或者采样数对不上文件大小。"""
+    try:
+        with open(path, "rb") as handle:
+            if handle.read(4) != b"fLaC":
+                return False
+            size = os.path.getsize(path)
+            samples = 0
+            rate = 0
+            last = False
+            for _ in range(16):
+                header = handle.read(4)
+                if len(header) < 4:
+                    return False
+                last = bool(header[0] & 0x80)
+                block = header[0] & 0x7F
+                length = int.from_bytes(header[1:4], "big")
+                if length > 1024 * 1024:
+                    return False
+                body = handle.read(length)
+                if len(body) < length:
+                    return False
+                if block == 0 and len(body) >= 18:
+                    rate = int.from_bytes(body[10:13], "big") >> 4
+                    samples = int.from_bytes(body[13:18], "big") & 0xFFFFFFFFF
+                if last:
+                    break
+            else:
+                return False
+            if not last or samples <= 0 or rate <= 0:
+                return False
+            # 母带大约 1MB 能播两秒。采样数对应的时长和文件大小差一个数量级，就是截断的。
+            seconds = samples / rate
+            return size > seconds * 16 * 1024
+    except OSError:
+        return False
+
+
 def lookup(song_id, level):
     index = _load()
     key = f"{song_id}:{level}"
@@ -55,14 +110,55 @@ def lookup(song_id, level):
         index.pop(key, None)
         _save(index)
         return ""
+    # 下到一半就被记进索引的文件，读完会被当成唱完。这种不能再当成本机缓存。
+    size = os.path.getsize(path)
+    if size < 256 * 1024 or size != int(item.get("size") or 0) or not _complete(path):
+        index.pop(key, None)
+        _save(index)
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        return ""
     item["played"] = int(__import__("time").time())
     index[key] = item
     _save(index)
     return path
 
 
-def store(song_id, level, ext, url, current_path=""):
-    """整首下完才记入索引。正在播放的文件不参与清理。"""
+_STORE_LOCK = threading.Lock()
+
+
+def network_down(exc):
+    """和接口请求里的「网络不可用」是同一类：超时、连不上、对端把连接掐断。
+
+    地址过期、没有权限、文件本身不完整都不算网络断开。
+    """
+    if isinstance(exc, urllib.error.HTTPError):
+        return exc.code in (408, 429) or exc.code >= 500
+    if isinstance(exc, (TimeoutError, ConnectionError, BrokenPipeError)):
+        return True
+    if isinstance(exc, urllib.error.URLError):
+        return True
+    text = str(exc).lower()
+    return any(word in text for word in (
+        "timed out", "timeout", "network is unreachable", "name or service not known",
+        "temporary failure", "connection reset", "connection refused", "broken pipe",
+        "unexpected_eof", "eof occurred",
+    ))
+
+
+def store(song_id, level, ext, url, current_path="", cancel=None, progress=None):
+    """整首下完才记入索引。正在播放的文件不参与清理。同一时间只缓存一首。"""
+    if not _STORE_LOCK.acquire(blocking=False):
+        raise OSError("已有缓存在下载")
+    try:
+        return _store(song_id, level, ext, url, current_path, cancel, progress)
+    finally:
+        _STORE_LOCK.release()
+
+
+def _store(song_id, level, ext, url, current_path="", cancel=None, progress=None):
     name = _safe_name(song_id, level, ext)
     dest = os.path.join(CACHE_DIR, name)
     os.makedirs(CACHE_DIR, exist_ok=True)
@@ -70,8 +166,14 @@ def store(song_id, level, ext, url, current_path=""):
     req = urllib.request.Request(url, headers={"User-Agent": "netease-music-linux", "Referer": "https://music.163.com/"})
     written = 0
     try:
-        with urllib.request.urlopen(req, timeout=60) as resp, open(part, "wb") as handle:
+        with urllib.request.urlopen(req, timeout=20) as resp, open(part, "wb") as handle:
+            total = int(resp.headers.get("Content-Length") or 0)
+            if progress is not None:
+                progress["total"] = total
+                progress["bytes"] = 0
             while True:
+                if cancel is not None and cancel.is_set():
+                    raise OSError("缓存已取消")
                 chunk = resp.read(65536)
                 if not chunk:
                     break
@@ -79,6 +181,8 @@ def store(song_id, level, ext, url, current_path=""):
                 if written > MAX_TRACK:
                     raise OSError("缓存文件过大")
                 handle.write(chunk)
+                if progress is not None:
+                    progress["bytes"] = written
     except Exception:
         try:
             os.remove(part)
@@ -86,6 +190,12 @@ def store(song_id, level, ext, url, current_path=""):
             pass
         raise
     os.replace(part, dest)
+    if not _complete(dest):
+        try:
+            os.remove(dest)
+        except OSError:
+            pass
+        raise OSError("缓存文件不完整")
     index = _load()
     index[f"{song_id}:{level}"] = {
         "path": dest,
@@ -99,18 +209,23 @@ def store(song_id, level, ext, url, current_path=""):
 
 
 def _trim(index, current_path):
+    """总量超过 800MB 时，按最久没播放的顺序腾出 200MB。正在播放的文件不动。"""
     current = os.path.realpath(current_path) if current_path else ""
     items = sorted(index.items(), key=lambda item: item[1].get("played") or 0)
     total = sum(int(item.get("size") or 0) for _key, item in items)
+    if total <= LIMIT - HEADROOM:
+        return
+    target = total - HEADROOM
     for key, item in items:
-        if total <= LIMIT:
+        if total <= target or total <= LIMIT - HEADROOM:
             break
         path = os.path.realpath(item.get("path") or "")
+        root = os.path.realpath(CACHE_DIR)
         if path and path == current:
             continue
         size = int(item.get("size") or 0)
         try:
-            if path and os.path.isfile(path):
+            if path.startswith(root + os.sep) and os.path.isfile(path):
                 os.remove(path)
         except OSError:
             pass

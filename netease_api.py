@@ -287,19 +287,20 @@ def _chart_songs(playlist_id, cookie):
 
 
 def song_qualities(song_id, cookie="", known=None):
-    """逐档请求播放地址，只保留服务端原样返回的档。
+    """逐档确认，只保留服务端原样返回的档。
 
-    不支持的档会被降到更低的 level，那种结果不记入可选项。
+    不支持的档会被降到更低的 level。降级的结果不能算作这一档支持，
+    否则每首歌的菜单都会列出全部档位。
     调用方已经持有某一档时传入 known，可少打一次请求。
     """
-    known = dict(known or {})
+    seen = dict(known or {})
     supported = []
     for key, _name, _hint in QUALITIES:
-        cached = known.get(key)
+        cached = seen.get(key)
         if cached is None:
             cached = song_url(song_id, level=key, cookie=cookie)
             if cached and cached.get("level"):
-                known[cached["level"]] = cached
+                seen[cached["level"]] = cached
         if cached and cached.get("level") == key and cached.get("url"):
             supported.append(key)
     return supported
@@ -447,7 +448,7 @@ _EAPI_KEY = b"e82ckenh8dichen8"
 
 
 def _eapi(path, data, cookie=""):
-    """网易云桌面端的加密接口。只用来取歌词，不改播放地址。"""
+    """网易云桌面端的加密接口。只用来取歌词。"""
     if path != "/api/song/lyric/v1":
         raise ApiError("只请求网易云音乐歌词接口")
     text = json.dumps(data, separators=(",", ":"))
@@ -880,6 +881,16 @@ def artist_home(artist_id, cookie=""):
         "songs": songs,
         "albums": albums,
     }
+
+
+def artist_playlists(artist_id, cookie="", limit=24):
+    """歌手相关歌单。主页只有简介时，用这里补上可以点开的歌单。"""
+    payload = request(
+        "/api/artist/top/playlist",
+        {"id": int(artist_id), "limit": limit},
+        cookie=cookie,
+    )
+    return [_playlist(item) for item in (payload.get("playlists") or payload.get("data") or [])]
 
 
 def artist_profile(artist_id, cookie=""):

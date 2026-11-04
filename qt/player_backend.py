@@ -52,6 +52,12 @@ class PlayerBackend(QObject):
         self.playbin = Gst.ElementFactory.make("playbin", "netease-qt")
         if self.playbin is None:
             raise RuntimeError("GStreamer playbin 不可用")
+        # 只留 1 秒缓冲。攒太久时，母带流会先空等十几秒才出声。
+        # BUFFERING 打开后，缓冲见底会发消息，由下面先暂停、够了再接着播。
+        flags = int(self.playbin.get_property("flags"))
+        self.playbin.set_property("flags", flags | (1 << 8))
+        self.playbin.set_property("buffer-duration", 1 * Gst.SECOND)
+        self.playbin.set_property("buffer-size", 512 * 1024)
         self._want = "stopped"
         self._uri = ""
         self._position = 0
@@ -64,6 +70,7 @@ class PlayerBackend(QObject):
         self._clock = None
         self._held_pause = False
         self._paused_at = 0.0
+        self._buffering = False
         self._lock = threading.Lock()
         bus = self.playbin.get_bus()
         bus.add_signal_watch()
@@ -73,11 +80,8 @@ class PlayerBackend(QObject):
         return self._want
 
     def position(self):
+        # 只返回管道报过的位置。按时钟往前猜的话，网络卡住没声音，进度还会自己走。
         with self._lock:
-            if self._want == "playing" and self._started_at:
-                guessed = self._anchor + int((time.time() - self._started_at) * 1000)
-                if guessed > self._position:
-                    self._position = guessed
             return self._position, self._duration
 
     def begin_switch(self, keep=0):
@@ -114,10 +118,13 @@ class PlayerBackend(QObject):
             self._want = "playing"
             self._held_pause = False
             self._paused_at = 0.0
+            self._buffering = False
             if not keep:
                 self._seek_target = None
         self.playbin.set_property("uri", url)
         self._uri = url
+        # 本机缓存不用等。网络流只留 1 秒，避免母带还没出声就空等。
+        self.playbin.set_property("buffer-duration", 0 if url.startswith("file:") else 1 * Gst.SECOND)
         self.playbin.set_state(Gst.State.PLAYING)
         # 续播还没跳到原进度时，不要把时长发成 0，否则界面会停在暂停。
         if not keep:
@@ -155,6 +162,16 @@ class PlayerBackend(QObject):
             paused_at = self._paused_at
         return not paused_at or time.time() - paused_at <= 20 * 60
 
+    def heard(self):
+        """管道实际播到的位置。不把时钟猜出来的进度算进去。"""
+        try:
+            ok, value = self.playbin.query_position(Gst.Format.TIME)
+        except Exception:
+            return 0
+        if not ok or value <= 0:
+            return 0
+        return int(value / 1_000_000)
+
     def drop_source(self):
         """旧流已经不能续播。进度留下，地址清掉，避免失败被当成唱完。"""
         with self._lock:
@@ -176,10 +193,9 @@ class PlayerBackend(QObject):
             self._held_pause = False
             self._paused_at = 0.0
             self._anchor = held
-            # 续播定位还没落地。先不走进度，等定位到达再开始。
-            self._started_at = 0
-            self._seek_target = held if held > 500 else None
-            self._seek_stamp = time.time()
+            # 暂停只是把同一条管道停住。接着播不要再定位，定位会把缓冲冲掉，听起来又卡一下。
+            self._started_at = time.time()
+            self._seek_target = None
         state = Gst.State.NULL
         try:
             _ok, state, _pending = self.playbin.get_state(0)
@@ -189,10 +205,7 @@ class PlayerBackend(QObject):
             self.playbin.set_property("uri", self._uri)
         self.playbin.set_state(Gst.State.PLAYING)
         self._ensure_clock()
-        if held > 500:
-            threading.Thread(target=self._seek_worker, args=(held,), daemon=True).start()
-        else:
-            self.stateChanged.emit("playing")
+        self.stateChanged.emit("playing")
         return True
 
     @pyqtSlot()
@@ -280,6 +293,21 @@ class PlayerBackend(QObject):
                 return
             self.stateChanged.emit("stopped")
             self.errorChanged.emit(str(err).split("\n", 1)[0])
+        elif message.type == Gst.MessageType.BUFFERING and self._want == "playing" and not self._held_pause:
+            # 本机文件不用这一套。网络流缓冲不够时先停住，超前播放位置再接着播。
+            if str(self._uri).startswith("file:"):
+                return
+            percent = int(message.parse_buffering())
+            if percent < self._resume_percent():
+                if not self._buffering:
+                    self._buffering = True
+                    self.playbin.set_state(Gst.State.PAUSED)
+                    self.stateChanged.emit("buffering")
+            elif self._buffering:
+                self._buffering = False
+                if self._want == "playing" and not self._held_pause:
+                    self.playbin.set_state(Gst.State.PLAYING)
+                    self.stateChanged.emit("playing")
         elif message.type == Gst.MessageType.ASYNC_DONE and self._want == "playing":
             with self._lock:
                 if self._want == "playing" and not self._seek_target:
@@ -304,6 +332,10 @@ class PlayerBackend(QObject):
             if self._want != "playing":
                 time.sleep(0.4)
                 continue
+            # 缓冲见底由总线消息在界面线程暂停。这里再改状态会和它抢管道。
+            if self._buffering:
+                time.sleep(0.3)
+                continue
             pos = dur = 0
             try:
                 ok, value = self.playbin.query_position(Gst.Format.TIME)
@@ -318,14 +350,27 @@ class PlayerBackend(QObject):
             # 正在跳转时勤一点，出声后界面才能马上从暂停变成播放。
             time.sleep(0.2 if self._seek_target else 1.0)
 
+    def _resume_percent(self):
+        """缓冲比当前播放位置超前约 2% 就可以接着播，最多不超过整首的 30%。"""
+        with self._lock:
+            position = self._position
+            duration = self._duration
+        if duration <= 0:
+            return 2
+        ahead = int(100 * position / duration) + 2
+        return min(30, max(2, ahead))
+
     def _store(self, pos, dur):
         emit = False
         with self._lock:
             if self._want != "playing":
                 pos = 0
             landed = self._seek_landed(pos)
-            if landed:
-                if pos:
+            if landed and pos > 0:
+                # 缓冲没稳时位置会一下跳到很后面再回到开头。这种回跳不往外发。
+                # 回跳只在回到开头时收下。卡在中间时位置来回抖，不能把进度和歌词带着循环。
+                backward = self._position and pos + 1500 < self._position
+                if not (backward and pos > 8000):
                     self._position = pos
                     self._anchor = pos
                 self._started_at = time.time()
@@ -334,7 +379,8 @@ class PlayerBackend(QObject):
                 emit = True
             else:
                 was_seeking = False
-            if dur and dur != self._duration:
+            # 刚开播时管道会先报一个接近整首的位置。那不是真的唱完，不能拿去切歌。
+            if dur and pos and pos < dur - 1500 and dur != self._duration:
                 self._duration = dur
                 emit = True
             current = self._position
