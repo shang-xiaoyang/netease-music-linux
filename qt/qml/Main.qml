@@ -217,8 +217,12 @@ ApplicationWindow {
         window.songAlbum = parts[6] || ""
         window.duration = Number(parts[4] || 0)
         window.currentArtists = parts[5] || ""
-        if (parts[0] !== window.currentSongId) {
-            window.currentSongId = parts[0] || ""
+        var previousId = window.currentSongId
+        var sameSong = parts[0] === previousId
+        window.currentSongId = parts[0] || ""
+        // 打开时进度先到、歌曲后到。这时还没有上一首，不能把刚恢复的位置清成 0。
+        // 播放中换成另一首才从开头显示，真正的进度随后由 bridgeClock 盖上。
+        if (!sameSong && previousId !== "") {
             window.position = 0
             window.positionAnchor = 0
             window.positionAt = Date.now()
@@ -2836,10 +2840,11 @@ ApplicationWindow {
                     }
 
                     function downloadCount(group) {
-                        if (!window.downloadModel)
+                        if (!window.downloadModel || !window.downloadModel.count)
                             return 0
                         var total = 0
-                        for (var i = 0; i < window.downloadModel.count; i++) {
+                        var rows = window.downloadModel.count()
+                        for (var i = 0; i < rows; i++) {
                             if (window.downloadModel.get(i).group === group)
                                 total += 1
                         }
@@ -2852,43 +2857,59 @@ ApplicationWindow {
                         Layout.leftMargin: 8
                         Layout.rightMargin: 8
                         Layout.topMargin: 4
-                        Layout.preferredHeight: 40
+                        Layout.preferredHeight: 36
                         spacing: 4
-                        Button {
-                            text: "已下载 " + (downloadPage.downloadRevision, downloadPage.downloadCount("已下载"))
-                            flat: true
-                            font.bold: downloadPage.downloadTab === "done"
-                            onClicked: downloadPage.downloadTab = "done"
-                            background: Rectangle {
-                                color: downloadPage.downloadTab === "done" ? "#FFFFFF" : "transparent"
-                                radius: 6
+                        Rectangle {
+                            Layout.preferredWidth: doneTab.implicitWidth + 20
+                            Layout.preferredHeight: 26
+                            radius: 6
+                            color: downloadPage.downloadTab === "done" ? "#FFFFFF" : "transparent"
+                            Label {
+                                id: doneTab
+                                anchors.centerIn: parent
+                                text: "已下载 " + (downloadPage.downloadRevision, downloadPage.downloadCount("已下载"))
+                                font.bold: downloadPage.downloadTab === "done"
+                                font.pixelSize: 13
+                                color: "#333333"
                             }
+                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: downloadPage.downloadTab = "done" }
                         }
-                        Button {
-                            text: "正在下载 " + (downloadPage.downloadRevision, downloadPage.downloadCount("正在下载"))
-                            flat: true
-                            font.bold: downloadPage.downloadTab === "active"
-                            onClicked: downloadPage.downloadTab = "active"
-                            background: Rectangle {
-                                color: downloadPage.downloadTab === "active" ? "#FFFFFF" : "transparent"
-                                radius: 6
+                        Rectangle {
+                            Layout.preferredWidth: activeTab.implicitWidth + 20
+                            Layout.preferredHeight: 26
+                            radius: 6
+                            color: downloadPage.downloadTab === "active" ? "#FFFFFF" : "transparent"
+                            Label {
+                                id: activeTab
+                                anchors.centerIn: parent
+                                text: "正在下载 " + (downloadPage.downloadRevision, downloadPage.downloadCount("正在下载"))
+                                font.bold: downloadPage.downloadTab === "active"
+                                font.pixelSize: 13
+                                color: "#333333"
                             }
+                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: downloadPage.downloadTab = "active" }
                         }
-                        Button {
-                            text: "下载失败 " + (downloadPage.downloadRevision, downloadPage.downloadCount("下载失败"))
-                            flat: true
-                            font.bold: downloadPage.downloadTab === "failed"
-                            onClicked: downloadPage.downloadTab = "failed"
-                            background: Rectangle {
-                                color: downloadPage.downloadTab === "failed" ? "#FFFFFF" : "transparent"
-                                radius: 6
+                        Rectangle {
+                            Layout.preferredWidth: failedTab.implicitWidth + 20
+                            Layout.preferredHeight: 26
+                            radius: 6
+                            color: downloadPage.downloadTab === "failed" ? "#FFFFFF" : "transparent"
+                            Label {
+                                id: failedTab
+                                anchors.centerIn: parent
+                                text: "下载失败 " + (downloadPage.downloadRevision, downloadPage.downloadCount("下载失败"))
+                                font.bold: downloadPage.downloadTab === "failed"
+                                font.pixelSize: 13
+                                color: "#333333"
                             }
+                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: downloadPage.downloadTab = "failed" }
                         }
                         Item { Layout.fillWidth: true }
                         Button {
                             visible: downloadPage.downloadTab === "active"
                             text: downloadPage.downloadsPaused ? "继续下载" : "暂停下载"
                             flat: true
+                            font.pixelSize: 13
                             enabled: (downloadPage.downloadRevision, downloadPage.downloadCount("正在下载")) > 0 || downloadPage.downloadsPaused
                             onClicked: {
                                 if (downloadPage.downloadsPaused) {
@@ -2904,6 +2925,7 @@ ApplicationWindow {
                             visible: downloadPage.downloadTab === "failed"
                             text: "全部重新下载"
                             flat: true
+                            font.pixelSize: 13
                             enabled: (downloadPage.downloadRevision, downloadPage.downloadCount("下载失败")) > 0
                             onClicked: {
                                 appBridge.retryFailedDownloads()
@@ -2914,6 +2936,7 @@ ApplicationWindow {
                         Button {
                             text: "打开文件夹"
                             flat: true
+                            font.pixelSize: 13
                             onClicked: appBridge.openDownloadFolder()
                         }
                     }
@@ -2921,7 +2944,7 @@ ApplicationWindow {
                         visible: downloadView.count === 0
                         text: parent.downloadTab === "done" ? "还没有已下载的歌曲。双击可以播放本地文件。" : parent.downloadTab === "active" ? "没有正在下载的歌曲。" : "没有下载失败的歌曲。"
                         color: Theme.muted
-                        font.pixelSize: 14
+                        font.pixelSize: 13
                         Layout.fillWidth: true
                         Layout.topMargin: 48
                         horizontalAlignment: Text.AlignHCenter
@@ -2937,7 +2960,7 @@ ApplicationWindow {
 
                         delegate: Item {
                             width: downloadView.width
-                            height: group === downloadView.tabGroup ? 44 : 0
+                            height: group === downloadView.tabGroup ? 40 : 0
                             visible: height > 0
                             Rectangle {
                                 anchors.fill: parent
@@ -2951,18 +2974,21 @@ ApplicationWindow {
                                     text: name
                                     Layout.fillWidth: true
                                     elide: Text.ElideRight
-                                    color: Theme.ink
+                                    color: "#333333"
+                                    font.pixelSize: 13
                                 }
                                 Label {
                                     text: status === "下载中" ? "正在下载" : status === "等待" ? "等待中" : status === "完成" ? quality : status
-                                    color: String(status).indexOf("失败") === 0 ? "#EC4141" : Theme.muted
-                                    Layout.preferredWidth: downloadView.tabGroup === "已下载" ? 88 : 220
+                                    color: String(status).indexOf("失败") === 0 ? "#EC4141" : "#8E8E93"
+                                    font.pixelSize: 12
+                                    Layout.preferredWidth: downloadView.tabGroup === "已下载" ? 72 : 180
                                     elide: Text.ElideRight
                                 }
                                 Button {
                                     visible: downloadView.tabGroup === "下载失败"
                                     text: "重新下载"
                                     flat: true
+                                    font.pixelSize: 12
                                     onClicked: {
                                         appBridge.retryDownload(songId)
                                         downloadPage.downloadsPaused = false

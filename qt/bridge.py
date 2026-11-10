@@ -7,7 +7,7 @@ AppBridge 仍是一个对象：界面、播放和下载要看同一份当前歌�
 
 - 窗口和账号：bind_window 到 openNav
 - 页面和歌单：_capture 到 openUser
-- 播放和缓存：playRow 到 _drop_broken_cache
+- 播放和缓存：playRow 到 _cache_ended_early
 - 下载管理：enqueueDownload 到 retryFailedDownloads
 """
 
@@ -145,6 +145,7 @@ class AppBridge(QObject):
         self._download_worker = None
         self._download_lock = threading.Lock()
         self._download_paused = False
+        self._download_wake = threading.Event()
         self._supported = []
         self._list_token = 0
         self._list_id = ""
@@ -177,6 +178,8 @@ class AppBridge(QObject):
         self._pending_window = {}
         self._bind_window_signals()
         self._fill_nav()
+        if any(item.get("status") == "等待" and item.get("song") for item in self._download_rows):
+            self._ensure_download_worker()
         self.historyChanged.emit("\n".join(self._load_search_history()))
         self.accountChanged.emit("登录")
         self.qualityChanged.emit(api.QUALITY_LABEL.get(self._quality, self._quality))
@@ -1804,6 +1807,7 @@ class AppBridge(QObject):
         self._song = song
         self._loading_pos = True
         keep = int(getattr(self, "_resume_at", 0) or 0)
+        self._cache_hold = 0
         self.player.begin_switch(keep)
         self.songChanged.emit("\n".join((
             song["songId"], song["name"], song.get("artist") or "", song.get("cover") or "",
@@ -1835,7 +1839,11 @@ class AppBridge(QObject):
                 self._loading_pos = False
             self.qualityChanged.emit(api.QUALITY_LABEL.get(self._quality, self._quality))
             threading.Thread(target=self._start_cached, args=(token, song), daemon=True).start()
-            threading.Thread(target=self._load_qualities, args=(token, song["songId"], None), daemon=True).start()
+            # 下载文件缺了会直接失败。播放缓存读到一半会停住，和网络流一样等大约 10 秒再切。
+            if not local:
+                threading.Thread(target=self._watch_stall, args=(token, song), daemon=True).start()
+            if str(song.get("songId") or "").isdigit():
+                threading.Thread(target=self._load_qualities, args=(token, song["songId"], None), daemon=True).start()
             return
         self.statusChanged.emit(f"正在获取{api.QUALITY_LABEL.get(self._quality, '')}…")
         threading.Thread(target=self._start, args=(token, song), daemon=True).start()
@@ -1846,8 +1854,12 @@ class AppBridge(QObject):
         label = api.QUALITY_LABEL.get(self._quality, self._quality)
         local = str(getattr(self.player, "_uri", "") or "").startswith("file:") and self._playing_download()
         self.statusChanged.emit(f"正在播放 · {label} · {'本机下载' if local else '本机缓存'}")
+        song_id = str(song.get("songId") or "")
+        if not song_id.isdigit():
+            self._post("lyric", "0\t本地文件没有歌词")
+            return
         try:
-            original, translated, words = api.lyric_pair(song["songId"], cookie=self._cookie)
+            original, translated, words = api.lyric_pair(song_id, cookie=self._cookie)
         except api.ApiError:
             return
         if token != self._token:
@@ -1870,16 +1882,23 @@ class AppBridge(QObject):
             # 缓冲中声音是停着的。已经出过声就继续计时，大约 10 秒还补不回来再切。
             # 开头还没出声、用户暂停、正在拖动，都不计。
             # 暂停时管道还可能留着缓冲标记。只要用户已经停了，就不能再按卡住切歌。
+            held_cache = int(getattr(self, "_cache_hold", 0) or 0)
             if (
-                self.player.want() != "playing"
-                or getattr(self.player, "_held_pause", False)
-                or self.player._seek_target is not None
-                or (self._loading_pos and not self.player._buffering)
+                not held_cache
+                and (
+                    self.player.want() != "playing"
+                    or getattr(self.player, "_held_pause", False)
+                    or self.player._seek_target is not None
+                    or (self._loading_pos and not self.player._buffering)
+                )
             ):
                 stalled_at = 0.0
                 stalled_pos = None
                 continue
-            heard = self.player.heard()
+            heard = held_cache or self.player.heard()
+            # 缓存文件提前读完后，管道位置会变成 0。用结束前记下的进度接着计时。
+            if heard <= 0:
+                heard = self.player.position()[0]
             if heard <= 0:
                 stalled_at = 0.0
                 stalled_pos = None
@@ -2336,6 +2355,8 @@ class AppBridge(QObject):
         self._post("volume", self._volume)
 
     def _load_qualities(self, token, song_id, known):
+        if not str(song_id or "").isdigit():
+            return
         try:
             supported = api.song_qualities(song_id, cookie=self._cookie, known={known.get("level"): known} if known else None)
         except api.ApiError:
@@ -3137,6 +3158,7 @@ class AppBridge(QObject):
         self._play_index(0)
 
     def _ensure_download_worker(self):
+        self._download_wake.set()
         with self._download_lock:
             alive = self._download_worker is not None and self._download_worker.is_alive()
             if alive:
@@ -3152,16 +3174,24 @@ class AppBridge(QObject):
         return "下载失败"
 
     def _download_view(self):
-        """保持下载记录原来的顺序。同一首已完成的歌只留最新一条，文件不在了就不显示。"""
+        """保持下载记录原来的顺序。同一首已完成的歌只留最新一条，文件不在了就不显示。
+
+        下载目录里已有、但记录里没有的文件补在后面。记录只认完成时写下的编号，
+        所以以前下好的歌一直不出现。
+        """
         latest = {}
+        known_paths = set()
         for index, item in enumerate(self._download_rows):
+            path = os.path.realpath(item.get("path") or "") if item.get("path") else ""
+            if path:
+                known_paths.add(path)
             if item.get("status") != "完成":
                 continue
             song_id = str(item.get("songId") or "")
-            key = song_id or (item.get("path") or item.get("name") or "")
+            key = song_id or path or (item.get("name") or "")
             if not key:
                 continue
-            if song_id and not self._local_download({"songId": song_id}, ""):
+            if not self._download_file(item):
                 continue
             latest[key] = index
         rows = []
@@ -3169,7 +3199,8 @@ class AppBridge(QObject):
             status = item.get("status") or ""
             if status == "完成":
                 song_id = str(item.get("songId") or "")
-                key = song_id or (item.get("path") or item.get("name") or "")
+                path = os.path.realpath(item.get("path") or "") if item.get("path") else ""
+                key = song_id or path or (item.get("name") or "")
                 if latest.get(key) != index:
                     continue
             path = item.get("path") or ""
@@ -3178,8 +3209,20 @@ class AppBridge(QObject):
                 "status": status,
                 "quality": item.get("quality") or "",
                 "path": os.path.basename(path) if path else "",
-                "songId": str(item.get("songId") or ""),
+                "songId": str(item.get("songId") or "") or path,
                 "group": self._download_group(status),
+            })
+        for path in self._folder_audio():
+            if path in known_paths:
+                continue
+            name = os.path.splitext(os.path.basename(path))[0]
+            rows.append({
+                "name": name,
+                "status": "完成",
+                "quality": "本地文件",
+                "path": os.path.basename(path),
+                "songId": path,
+                "group": "已下载",
             })
         return rows
 
@@ -3204,7 +3247,7 @@ class AppBridge(QObject):
                 "level": item.get("level") or "",
                 "song": item.get("song") if isinstance(item.get("song"), dict) else {},
             })
-        return rows[-80:]
+        return rows[-200:]
 
     def _save_downloads(self):
         payload = [
@@ -3217,7 +3260,7 @@ class AppBridge(QObject):
                 "level": item.get("level") or "",
                 "song": item.get("song") if isinstance(item.get("song"), dict) else {},
             }
-            for item in self._download_rows[-80:]
+            for item in self._download_rows[-200:]
         ]
         try:
             os.makedirs(DATA_DIR, exist_ok=True)
@@ -3229,18 +3272,35 @@ class AppBridge(QObject):
             pass
 
     def _download_loop(self):
+        """一直守着队列。暂停或暂时没有任务时不能退出，否则点了继续也没有线程再拉。"""
         while self._alive:
             with self._download_lock:
                 if self._download_paused:
-                    return
-                item = next((row for row in self._download_rows if row.get("status") == "等待" and row.get("song")), None)
-                if item is None:
-                    return
-                item["status"] = "下载中"
+                    item = None
+                else:
+                    item = next((row for row in self._download_rows if row.get("status") == "等待" and row.get("song")), None)
+                    if item is not None:
+                        item["status"] = "下载中"
+                        self._save_downloads()
+            if item is None:
+                if not self._download_wake.wait(1):
+                    continue
+                self._download_wake.clear()
+                continue
+            existing = self._local_download({"songId": item.get("songId")}, item.get("level") or "") or self._named_download(item)
+            if existing:
+                item["status"] = "完成"
+                item["path"] = existing
+                item["quality"] = item.get("quality") or "本地文件"
+                self._save_downloads()
+                self._mark_downloaded()
+                self._post("downloads", self._download_view())
+                continue
             self._post("downloads", self._download_view())
             try:
                 path, level = self._download_one(item["song"], item.get("level") or self._quality)
             except Exception as exc:
+                LOG.info("download failed id=%s name=%s %s", item.get("songId"), item.get("name"), exc)
                 item["status"] = f"失败：{exc}"
                 self._save_downloads()
                 self._post("downloads", self._download_view())
@@ -3252,10 +3312,9 @@ class AppBridge(QObject):
             item["quality"] = api.QUALITY_LABEL.get(level, level)
             self._save_downloads()
             self._mark_downloaded()
+            # 下完就换列表。正在看「正在下载」时，这首会离开，出现在「已下载」。
             self._post("downloads", self._download_view())
             self._post("status", f"下载完成：{os.path.basename(path)}")
-            if self._download_paused:
-                return
 
     def _download_one(self, song, level):
         info = api.song_url(song["songId"], level=level, cookie=self._cookie)
@@ -3269,22 +3328,37 @@ class AppBridge(QObject):
         dest = os.path.join(music, raw + "." + ext)
         if os.path.commonpath((os.path.abspath(music), os.path.abspath(dest))) != os.path.abspath(music):
             raise OSError("下载文件名无效")
-        req = urllib.request.Request(info["url"], headers={"User-Agent": api.UA, "Referer": "https://music.163.com/"})
         part = dest + ".part"
-        written = 0
-        try:
-            with urllib.request.urlopen(req, timeout=60) as resp, open(part, "wb") as handle:
-                while True:
-                    chunk = resp.read(65536)
-                    if not chunk:
-                        break
-                    written += len(chunk)
-                    if written > 200 * 1024 * 1024:
-                        raise OSError("下载文件过大")
-                    handle.write(chunk)
-        except Exception:
+        have = os.path.getsize(part) if os.path.isfile(part) else 0
+        if have >= 200 * 1024 * 1024:
             try:
                 os.remove(part)
+            except OSError:
+                pass
+            have = 0
+        headers = {"User-Agent": api.UA, "Referer": "https://music.163.com/"}
+        if have:
+            headers["Range"] = f"bytes={have}-"
+        req = urllib.request.Request(info["url"], headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                code = getattr(resp, "status", None) or resp.getcode()
+                resume = bool(have and code == 206)
+                written = have if resume else 0
+                with open(part, "ab" if resume else "wb") as handle:
+                    while True:
+                        chunk = resp.read(65536)
+                        if not chunk:
+                            break
+                        written += len(chunk)
+                        if written > 200 * 1024 * 1024:
+                            raise OSError("下载文件过大")
+                        handle.write(chunk)
+        except Exception:
+            # 网络中断时留下已写的部分，下次从断点继续。空文件才删。
+            try:
+                if os.path.isfile(part) and os.path.getsize(part) <= 0:
+                    os.remove(part)
             except OSError:
                 pass
             raise
@@ -3293,6 +3367,71 @@ class AppBridge(QObject):
 
     def _music_folder(self):
         return os.path.join(os.path.expanduser("~/Music"), "网易云音乐")
+
+    def _music_folders(self):
+        """现在写到 ~/Music。旧版写到 ~/音乐，同一台机器上两处都要认。"""
+        folders = [self._music_folder(), os.path.join(os.path.expanduser("~"), "音乐", "网易云音乐")]
+        seen = []
+        for folder in folders:
+            real = os.path.realpath(folder)
+            if real not in seen:
+                seen.append(real)
+        return seen
+
+    def _in_music_folder(self, path):
+        path = os.path.realpath(path or "")
+        if not path or path.endswith(".part") or not os.path.isfile(path):
+            return False
+        return any(path.startswith(root + os.sep) for root in self._music_folders())
+
+    def _download_file(self, item):
+        """完成记录指向的真实文件。必须在下载目录里，不能是半截文件。"""
+        if (item or {}).get("status") != "完成":
+            return ""
+        path = os.path.realpath((item or {}).get("path") or "")
+        if not self._in_music_folder(path):
+            return ""
+        return path
+
+    def _folder_audio(self):
+        """下载目录里记录没有的音频。半截 .part 不算下完。"""
+        found = []
+        seen = set()
+        for root in self._music_folders():
+            if not os.path.isdir(root):
+                continue
+            try:
+                names = os.listdir(root)
+            except OSError:
+                continue
+            for name in sorted(names):
+                if name.startswith(".") or name.endswith(".part"):
+                    continue
+                ext = os.path.splitext(name)[1].lower()
+                if ext not in (".mp3", ".flac", ".ogg", ".m4a", ".wav", ".aac"):
+                    continue
+                path = os.path.realpath(os.path.join(root, name))
+                if path in seen or not self._in_music_folder(path):
+                    continue
+                seen.add(path)
+                found.append(path)
+        return found
+
+    def _named_download(self, item):
+        """记录还没有路径时，用「歌手 - 歌名」对上下载目录里已经下完的文件。"""
+        song = item.get("song") if isinstance(item.get("song"), dict) else {}
+        artist = song.get("artist") or ""
+        name = song.get("name") or item.get("name") or ""
+        if not name:
+            return ""
+        stem = f"{artist} - {name}" if artist else name
+        stem = stem.replace("/", " ").replace("\\", " ").replace("\x00", "").strip(" .")
+        if not stem:
+            return ""
+        for path in self._folder_audio():
+            if os.path.splitext(os.path.basename(path))[0] == stem:
+                return path
+        return ""
 
     def _song_saved(self, song_id):
         return bool(AppBridge._local_download(self, {"songId": song_id}, ""))
@@ -3317,16 +3456,18 @@ class AppBridge(QObject):
         song_id = str((song or {}).get("songId") or "")
         if not song_id:
             return ""
-        music = os.path.realpath(self._music_folder())
+        # 已下载页里没有编号的旧文件，编号栏放的就是文件路径。
+        direct = self._download_file({"status": "完成", "path": song_id})
+        if direct:
+            return direct
         for item in reversed(self._download_rows):
             if str(item.get("songId") or "") != song_id or item.get("status") != "完成":
                 continue
             if level and item.get("level") and item.get("level") != level:
                 continue
-            path = os.path.realpath(item.get("path") or "")
-            if not path.startswith(music + os.sep) or not os.path.isfile(path):
-                continue
-            return path
+            path = self._download_file(item)
+            if path:
+                return path
         return ""
 
     def _playing_download(self):
@@ -3334,13 +3475,21 @@ class AppBridge(QObject):
         if uri.scheme != "file":
             return False
         path = os.path.realpath(urllib.request.url2pathname(uri.path))
-        music = os.path.realpath(self._music_folder())
-        return path.startswith(music + os.sep)
+        return self._in_music_folder(path)
 
     def _completed_download(self, song_id):
         song_id = str(song_id or "")
         if not song_id:
             return None
+        direct = self._download_file({"status": "完成", "path": song_id})
+        if direct:
+            return {
+                "name": os.path.splitext(os.path.basename(direct))[0],
+                "status": "完成",
+                "path": direct,
+                "songId": "",
+                "song": {},
+            }, direct
         for item in reversed(self._download_rows):
             if str(item.get("songId") or "") != song_id or item.get("status") != "完成":
                 continue
@@ -3360,14 +3509,20 @@ class AppBridge(QObject):
     def _downloaded_songs(self):
         songs = []
         seen = set()
-        for item in self._download_rows:
-            song_id = str(item.get("songId") or "")
-            if not song_id or song_id in seen or item.get("status") != "完成":
+        for row in self._download_view():
+            if row.get("group") != "已下载":
                 continue
-            if not self._local_download({"songId": song_id}, ""):
+            key = str(row.get("songId") or "")
+            if not key or key in seen:
                 continue
-            seen.add(song_id)
-            songs.append(self._song_from_download(item))
+            path = self._local_download({"songId": key}, "")
+            if not path:
+                continue
+            seen.add(key)
+            song = self._song_from_download({"songId": key, "name": row.get("name") or "", "path": path, "song": {}})
+            if os.path.realpath(key) == path:
+                song["songId"] = path
+            songs.append(song)
         return songs
 
     @pyqtSlot(str)
@@ -3376,11 +3531,11 @@ class AppBridge(QObject):
         if not found:
             self.statusChanged.emit("本地文件不在了，请重新下载")
             return
-        item, _path = found
+        item, path = found
         song = self._song_from_download(item)
         if not song.get("songId"):
-            self.statusChanged.emit("旧的下载记录没有歌曲编号，请重新下载后再播放")
-            return
+            song["songId"] = path
+            song["name"] = os.path.splitext(os.path.basename(path))[0]
         others = self._downloaded_songs() or [song]
         self._queue = others
         self._queue_source = "downloads"
@@ -3397,10 +3552,11 @@ class AppBridge(QObject):
         if not found:
             self.statusChanged.emit("本地文件不在了，请重新下载")
             return
-        item, _path = found
+        item, path = found
         song = self._song_from_download(item)
         if not song.get("songId"):
-            return
+            song["songId"] = path
+            song["name"] = os.path.splitext(os.path.basename(path))[0]
         if self._refuse_unplayable(song):
             return
         if item.get("level"):
@@ -3494,6 +3650,9 @@ class AppBridge(QObject):
         if not songs:
             return
         pos, dur = self.player.position()
+        # 播放器还没出声时位置是 0。恢复后的进度在 _resume_at，不能用 0 把它盖掉。
+        if not pos:
+            pos = int(getattr(self, "_resume_at", 0) or 0)
         payload = {
             "index": self._index,
             "position": int(pos or 0),
@@ -3547,6 +3706,8 @@ class AppBridge(QObject):
         self._resume_at = position
         song_id = str(self._song.get("songId") or "")
         self.currentSongChanged.emit(song_id)
+        # 进度要在歌曲前面到界面。换歌会把进度条清成 0，后到的进度才能留住。
+        self.clockChanged.emit(f"{position},{duration}")
         self.songChanged.emit("\n".join((
             song_id, self._song.get("name") or "", self._song.get("artist") or "",
             self._song.get("cover") or "", str(duration), self._artist_payload(self._song),
@@ -3591,6 +3752,7 @@ class AppBridge(QObject):
     def stop(self):
         self._alive = False
         self._login["done"] = True
+        # 先记下进度再停管道。停掉之后位置是 0，再保存就会把上次听到的地方盖掉。
         self._save_state()
         self._close_desk_lyric()
         self.player.stop()  # 退出时已在界面线程
@@ -3867,35 +4029,28 @@ class AppBridge(QObject):
     def _on_ended(self):
         if getattr(self.player, "_held_pause", False):
             return
-        heard = self.player.heard()
+        heard = self.player.heard() or self.player.position()[0]
         song = self._song or {}
         duration = int(song.get("duration") or 0)
-        # 本机缓存读完了，但还没到这首歌的时长，说明文件是截断的。删掉并重新缓存，不切下一首。
-        if duration and heard < duration - 3000 and self._drop_broken_cache(song):
+        # 本机缓存读完了，但还没到这首歌的时长。文件停在这里，和网络卡住是同一件事。
+        # 重开这首会从缓存开头再播一遍。留给卡住检测，大约 10 秒后切下一首。
+        if duration and heard < duration - 3000 and self._cache_ended_early(song):
             LOG.info("cache short id=%s heard=%s duration=%s", song.get("songId"), heard, duration)
-            self.statusChanged.emit("缓存不完整，从刚才的位置重新缓存")
-            # 只接回这一首已经听到的位置。清掉它，重开会从 0 开始。
-            self._resume_at = heard
-            self._play_index(self._index)
+            self.statusChanged.emit("缓存停住了，等待切换下一首")
+            # 文件结束后管道不再是播放中，位置也会变成 0。卡住检测只认这个记下的进度。
+            self._cache_hold = heard
+            self._publish_desk_lyric(heard)
             return
         self._step(1)
 
-    def _drop_broken_cache(self, song):
-        """只删除正在播放的那份本机缓存，并让索引下次不再命中它。"""
+    def _cache_ended_early(self, song):
+        """正在播的是播放缓存里的文件，而且在整首结束前就读完了。"""
         uri = urllib.parse.urlparse(str(getattr(self.player, "_uri", "") or ""))
         if uri.scheme != "file":
             return False
         real = os.path.realpath(urllib.request.url2pathname(uri.path))
         folder = os.path.realpath(os.path.join(os.path.expanduser("~/.cache"), "netease-cloud-music", "playback"))
-        if not real.startswith(folder + os.sep) or not os.path.isfile(real):
-            return False
-        try:
-            os.remove(real)
-        except OSError:
-            return False
-        # 文件已经没了。再查一次是为了把索引里的记录清掉。
-        cache_lookup(song.get("songId"), self._quality)
-        return True
+        return real.startswith(folder + os.sep) and os.path.isfile(real)
 
     def _emit_clock(self):
         if self.player.want() != "playing":

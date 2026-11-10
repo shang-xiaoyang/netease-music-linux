@@ -22,6 +22,11 @@ class DictListModel(QAbstractListModel):
             return 0
         return len(self._rows)
 
+    @pyqtSlot(result=int)
+    def count(self):
+        """QML 里这个模型没有 count 属性。选项上的数字必须走这个方法。"""
+        return len(self._rows)
+
     def data(self, index, role):
         if not index.isValid() or index.row() >= len(self._rows):
             return None

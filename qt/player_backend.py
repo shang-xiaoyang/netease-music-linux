@@ -37,8 +37,9 @@ def allowed_uri(url):
     if not os.path.isfile(path):
         return False
     music = os.path.join(os.path.expanduser("~/Music"), "网易云音乐")
+    legacy = os.path.join(os.path.expanduser("~"), "音乐", "网易云音乐")
     cache = os.path.join(os.path.expanduser("~/.cache"), "netease-cloud-music", "playback")
-    return _under(path, music) or _under(path, cache)
+    return _under(path, music) or _under(path, legacy) or _under(path, cache)
 
 
 class PlayerBackend(QObject):
@@ -210,7 +211,12 @@ class PlayerBackend(QObject):
 
     @pyqtSlot()
     def stop(self):
+        # 管道停到 NULL 之后再问位置会得到 0。退出前先把听到的进度留下。
+        heard = self.heard()
         with self._lock:
+            if heard > 0:
+                self._position = heard
+                self._anchor = heard
             self._want = "stopped"
             self._held_pause = False
             self._paused_at = 0.0
@@ -269,6 +275,15 @@ class PlayerBackend(QObject):
                 else:
                     self._want = "paused"
                     self._started_at = 0
+                    # 文件结束时管道位置经常是 0。先记下结束前的进度，否则截断的缓存会被当成从头唱完。
+                    try:
+                        ok, value = self.playbin.query_position(Gst.Format.TIME)
+                    except Exception:
+                        ok, value = False, 0
+                    if ok and value > 0:
+                        heard = int(value / 1_000_000)
+                        self._position = heard
+                        self._anchor = heard
             if held:
                 self.playbin.set_state(Gst.State.NULL)
                 self.stateChanged.emit("paused")
