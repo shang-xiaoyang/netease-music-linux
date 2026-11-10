@@ -163,29 +163,29 @@ def _store(song_id, level, ext, url, current_path="", cancel=None, progress=None
     dest = os.path.join(CACHE_DIR, name)
     os.makedirs(CACHE_DIR, exist_ok=True)
     part = dest + ".part"
-    req = urllib.request.Request(url, headers={"User-Agent": "netease-music-linux", "Referer": "https://music.163.com/"})
-    written = 0
-    try:
-        with urllib.request.urlopen(req, timeout=20) as resp, open(part, "wb") as handle:
-            total = int(resp.headers.get("Content-Length") or 0)
-            if progress is not None:
-                progress["total"] = total
-                progress["bytes"] = 0
-            while True:
-                if cancel is not None and cancel.is_set():
-                    raise OSError("缓存已取消")
-                chunk = resp.read(65536)
-                if not chunk:
-                    break
-                written += len(chunk)
-                if written > MAX_TRACK:
-                    raise OSError("缓存文件过大")
-                handle.write(chunk)
-                if progress is not None:
-                    progress["bytes"] = written
-    except Exception:
+    # 上次没下完的半截留着。服务器认 Range 时从断点接着下，不认再从头写。
+    have = os.path.getsize(part) if os.path.isfile(part) else 0
+    if have >= MAX_TRACK:
         try:
             os.remove(part)
+        except OSError:
+            pass
+        have = 0
+    headers = {"User-Agent": "netease-music-linux", "Referer": "https://music.163.com/"}
+    if have:
+        headers["Range"] = f"bytes={have}-"
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            code = getattr(resp, "status", None) or resp.getcode()
+            resume = bool(have and code == 206)
+            with open(part, "ab" if resume else "wb") as handle:
+                _read_cache(resp, handle, have if resume else 0, cancel, progress)
+    except Exception:
+        # 断网、退出时留下已写的部分。只有空文件才删。
+        try:
+            if os.path.isfile(part) and os.path.getsize(part) <= 0:
+                os.remove(part)
         except OSError:
             pass
         raise
@@ -206,6 +206,26 @@ def _store(song_id, level, ext, url, current_path="", cancel=None, progress=None
     _trim(index, current_path)
     _save(index)
     return dest
+
+
+def _read_cache(resp, handle, written, cancel, progress):
+    total = int(resp.headers.get("Content-Length") or 0)
+    if progress is not None:
+        progress["total"] = total + written if written else total
+        progress["bytes"] = written
+    while True:
+        if cancel is not None and cancel.is_set():
+            raise OSError("缓存已取消")
+        chunk = resp.read(65536)
+        if not chunk:
+            break
+        written += len(chunk)
+        if written > MAX_TRACK:
+            raise OSError("缓存文件过大")
+        handle.write(chunk)
+        if progress is not None:
+            progress["bytes"] = written
+    return written
 
 
 def _trim(index, current_path):

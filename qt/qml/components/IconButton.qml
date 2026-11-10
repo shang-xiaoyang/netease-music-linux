@@ -7,6 +7,7 @@ Item {
     property string iconName: ""
     property string label: ""
     property bool active: false
+    property bool enabled: true
     property color ink: "#222222"
     property int size: 16
     property string tip: ""
@@ -42,14 +43,15 @@ Item {
     Rectangle {
         anchors.fill: parent
         radius: 16
-        color: iconHover.containsMouse ? "#F2F2F4" : "transparent"
+        color: iconButton.enabled && iconHover.containsMouse ? "#F2F2F4" : "transparent"
         z: -1
     }
     MouseArea {
         id: iconHover
         anchors.fill: parent
         hoverEnabled: true
-        cursorShape: Qt.PointingHandCursor
+        enabled: iconButton.enabled
+        cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
         onClicked: iconButton.clicked()
         ToolTip.visible: containsMouse && iconButton.tip !== ""
         ToolTip.text: iconButton.tip

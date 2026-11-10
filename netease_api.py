@@ -591,6 +591,31 @@ def remove_playlist_track(playlist_id, song_id, cookie):
     _manipulate_track(playlist_id, song_id, "del", cookie)
 
 
+def manipulate_playlist_tracks(playlist_id, song_ids, op, cookie, batch_size=50):
+    """按小批次修改歌单曲目，避免为每首歌单独发请求。"""
+    if op not in ("add", "del"):
+        raise ApiError("歌单操作无效")
+    ids = list(dict.fromkeys(int(song_id) for song_id in song_ids if str(song_id).isdigit()))
+    size = max(1, int(batch_size or 50))
+    completed = 0
+    for start in range(0, len(ids), size):
+        batch = ids[start:start + size]
+        if not batch:
+            continue
+        try:
+            request(
+                "/api/playlist/manipulate/tracks",
+                {"op": op, "pid": int(playlist_id), "trackIds": json.dumps(batch)},
+                cookie=cookie,
+            )
+        except ApiError as exc:
+            if completed:
+                raise ApiError(f"已处理 {completed} 首，后续批次失败：{exc}") from exc
+            raise
+        completed += len(batch)
+    return completed
+
+
 def playlist_track_ids(playlist_id, cookie=""):
     """只取曲目 id，用来判断歌曲在不在自建歌单里。"""
     payload = request("/api/v6/playlist/detail", {"id": int(playlist_id), "n": 0}, cookie=cookie)

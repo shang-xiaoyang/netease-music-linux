@@ -81,6 +81,61 @@ ApplicationWindow {
     property int playlistSpecial: 0
     property string playlistCreator: ""
     property string playlistCreatorId: ""
+    property bool batchMode: false
+    property bool batchAll: false
+    property var batchSelectedIds: []
+
+    function selectionCode() {
+        var ids = batchSelectedIds.slice()
+        return batchAll ? "*" + (ids.length ? ":" + ids.join(",") : "") : ids.join(",")
+    }
+
+    function rowSelected(songId) {
+        var selected = batchSelectedIds.indexOf(String(songId || "")) >= 0
+        return batchAll ? !selected : selected
+    }
+
+    function toggleSong(songId) {
+        var id = String(songId || "")
+        if (id === "")
+            return
+        var next = batchSelectedIds.slice()
+        var at = next.indexOf(id)
+        if (batchAll) {
+            if (at < 0)
+                next.push(id)
+            else
+                next.splice(at, 1)
+        } else {
+            if (at < 0)
+                next.push(id)
+            else
+                next.splice(at, 1)
+        }
+        batchSelectedIds = next
+    }
+
+    function selectedCount() {
+        return batchAll ? Math.max(0, bridgeListCount - batchSelectedIds.length) : batchSelectedIds.length
+    }
+
+    function toggleSelectAll() {
+        // 全选代表整张歌单，不是只勾当前已加载的行。
+        batchAll = !batchAll
+        batchSelectedIds = []
+    }
+
+    function enterBatchMode() {
+        batchSelectedIds = []
+        batchAll = false
+        batchMode = true
+    }
+
+    function exitBatchMode() {
+        batchMode = false
+        batchAll = false
+        batchSelectedIds = []
+    }
 
     function clock(ms) {
         var value = Math.max(0, Math.floor(Number(ms || 0) / 1000))
@@ -112,6 +167,9 @@ ApplicationWindow {
     property string bridgeLiked: ""
     property string bridgeCurrentSong: ""
     property string bridgePlaylistMeta: ""
+    property string bridgeNavigation: ""
+    property int bridgeListCount: 0
+    property string batchCollectOpen: ""
     onBridgeStatusChanged: status.text = bridgeStatus
     onBridgeSuggestChanged: window.suggestText = bridgeSuggest || ""
     onBridgeStateChanged: {
@@ -174,6 +232,7 @@ ApplicationWindow {
         window.pageTitle = parts.slice(1).join("\n")
         if (window.pageName === "list" || window.pageName === "playlist")
             window.listReset = window.listReset + 1
+        songPick.clear()
     }
     onBridgeAccountChanged: account.text = bridgeAccount
     onBridgeModeChanged: window.modeText = bridgeMode
@@ -203,6 +262,21 @@ ApplicationWindow {
     onBridgeQualitiesChanged: qualityMenu.model = bridgeQualities
     onBridgeLikedChanged: window.liked = bridgeLiked === "1"
     onBridgeCurrentSongChanged: window.currentSongId = bridgeCurrentSong
+    onBridgeListCountChanged: window.bridgeListCount = Number(bridgeListCount || 0)
+    onBatchCollectOpenChanged: {
+        if (batchCollectOpen !== "") {
+            collectPopup.batchSelection = batchCollectOpen
+            batchCollectOpen = ""
+            appBridge.openCollect()
+            collectPopup.batchMode = true
+            collectPopup.open()
+        }
+    }
+    onBridgeNavigationChanged: {
+        exitBatchMode()
+        pageMoreMenu.close()
+        batchRemoveDialog.close()
+    }
     onBridgePlaylistMetaChanged: {
         var parts = (bridgePlaylistMeta || "").split("|")
         window.playlistOwned = parts[0] === "1"
@@ -857,52 +931,165 @@ ApplicationWindow {
             anchors.right: parent.right
             anchors.top: parent.top
             anchors.bottom: parent.bottom
-            Row {
-                id: pageHead
-                visible: window.pageName !== "home"
-                anchors.left: parent.left
-                anchors.right: parent.right
-                anchors.top: parent.top
-                anchors.leftMargin: 8
-                anchors.topMargin: 8
-                height: visible ? 36 : 0
-                spacing: 4
-                Item {
-                    width: 28
-                    height: 28
-                    anchors.verticalCenter: parent.verticalCenter
+            ColumnLayout {
+                anchors.fill: parent
+                spacing: 0
+                RowLayout {
+                    id: pageHead
+                    visible: window.pageName !== "home"
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 8
+                    Layout.rightMargin: 8
+                    Layout.topMargin: 8
+                    Layout.preferredHeight: visible ? 36 : 0
+                    spacing: 4
+                    Item {
+                        width: 28
+                        height: 28
+                        Layout.alignment: Qt.AlignVCenter
+                        Label { anchors.centerIn: parent; text: "‹"; color: "#333333"; font.pixelSize: 18 }
+                        MouseArea {
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: appBridge.goBack()
+                            ToolTip.visible: containsMouse
+                            ToolTip.text: "返回"
+                            ToolTip.delay: 400
+                        }
+                    }
                     Label {
-                        anchors.centerIn: parent
-                        text: "‹"
+                        text: window.pageTitle
                         color: "#333333"
                         font.pixelSize: 18
+                        font.bold: true
+                        elide: Text.ElideRight
+                        Layout.fillWidth: true
+                        Layout.alignment: Qt.AlignVCenter
                     }
-                    MouseArea {
-                        anchors.fill: parent
-                        hoverEnabled: true
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: appBridge.goBack()
-                        ToolTip.visible: containsMouse
-                        ToolTip.text: "返回"
-                        ToolTip.delay: 400
+                    Row {
+                        visible: false
+                        spacing: 8
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: visible ? 36 : 0
+                        Layout.alignment: Qt.AlignVCenter
+                        Item {
+                            width: 16
+                            height: 16
+                            anchors.verticalCenter: parent.verticalCenter
+                            Rectangle {
+                                anchors.fill: parent
+                                radius: 3
+                                border.width: 1
+                                border.color: window.batchAll ? "#EC4141" : "#B8B8BE"
+                                color: window.batchAll ? "#EC4141" : "transparent"
+                            }
+                            Label {
+                                anchors.centerIn: parent
+                                text: window.batchAll ? "✓" : window.selectedCount() > 0 ? "−" : ""
+                                color: "white"
+                                font.pixelSize: 12
+                            }
+                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: window.toggleSelectAll() }
+                        }
+                        Label {
+                            text: window.selectedCount() + " / " + window.bridgeListCount + " 首"
+                            color: "#333333"
+                            font.pixelSize: 13
+                            anchors.verticalCenter: parent.verticalCenter
+                        }
+                        IconButton {
+                            kind: "play"
+                            tip: "播放选中"
+                            enabled: window.selectedCount() > 0
+                            onClicked: { appBridge.batchAction("play", window.selectionCode()); window.exitBatchMode() }
+                        }
+                        IconButton {
+                            kind: "plus"
+                            tip: "加入播放列表"
+                            enabled: window.selectedCount() > 0
+                            onClicked: { appBridge.batchAction("queue", window.selectionCode()); window.exitBatchMode() }
+                        }
+                        IconButton {
+                            kind: "heart"
+                            tip: "收藏到歌单"
+                            enabled: window.selectedCount() > 0
+                            onClicked: {
+                                collectPopup.batchMode = true
+                                collectPopup.batchSelection = window.selectionCode()
+                                appBridge.openCollect()
+                                collectPopup.open()
+                            }
+                        }
+                        IconButton {
+                            kind: "download"
+                            tip: "下载选中"
+                            enabled: window.selectedCount() > 0
+                            onClicked: { appBridge.batchAction("download", window.selectionCode()); window.exitBatchMode() }
+                        }
+                        IconButton {
+                            kind: "close"
+                            tip: "从歌单移除"
+                            visible: window.pageName === "playlist" && window.playlistOwned
+                            enabled: window.selectedCount() > 0
+                            onClicked: batchRemoveDialog.open()
+                        }
+                    }
+                    Button {
+                        visible: false
+                        text: "完成"
+                        flat: true
+                        Layout.alignment: Qt.AlignVCenter
+                        onClicked: window.exitBatchMode()
                     }
                 }
-                Label {
-                    text: window.pageTitle
-                    color: "#333333"
-                    font.pixelSize: 18
-                    font.bold: true
-                    elide: Text.ElideRight
-                    width: parent.width - 48
-                    anchors.verticalCenter: parent.verticalCenter
+                Menu {
+                    id: pageMoreMenu
+                    parent: window.contentItem
+                    z: 30
+                    MenuItem {
+                        text: "分享"
+                        onTriggered: appBridge.sharePage()
+                    }
+                    MenuItem {
+                        text: "批量操作"
+                        onTriggered: window.enterBatchMode()
+                    }
+                    MenuItem {
+                        text: "下一首播放"
+                        onTriggered: window.pageName === "playlist" ? appBridge.playListNext() : appBridge.playAlbumNext()
+                    }
+                    MenuItem {
+                        text: window.playlistCollected ? "已收藏歌单" : "收藏歌单"
+                        visible: window.pageName === "playlist" && !window.playlistOwned && window.playlistSpecial !== 5
+                        height: visible ? implicitHeight : 0
+                        onTriggered: appBridge.toggleSubscribe()
+                    }
                 }
-            }
-            StackLayout {
-                anchors.left: parent.left
-                anchors.right: parent.right
-                anchors.top: pageHead.bottom
-                anchors.bottom: parent.bottom
-                currentIndex: window.pageName === "discover" ? 1 : window.pageName === "list" ? 2 : window.pageName === "playlist" ? 3 : window.pageName === "album" ? 4 : window.pageName === "artist" ? 5 : window.pageName === "lyric" ? 6 : window.pageName === "comments" ? 7 : window.pageName === "user" ? 8 : window.pageName === "downloads" ? 9 : 0
+                Dialog {
+                    id: batchRemoveDialog
+                    title: "从歌单移除歌曲"
+                    modal: true
+                    standardButtons: Dialog.Ok | Dialog.Cancel
+                    width: 300
+                    x: (window.width - width) / 2
+                    y: 110
+                    Label {
+                        width: parent.width
+                        wrapMode: Text.Wrap
+                        text: "确定从当前歌单移除已选择的 " + window.selectedCount() + " 首歌曲吗？"
+                        color: "#333333"
+                    }
+                    onAccepted: {
+                        appBridge.batchAction("remove", window.selectionCode())
+                        window.exitBatchMode()
+                    }
+                }
+
+                StackLayout {
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    currentIndex: window.pageName === "discover" ? 1 : window.pageName === "list" ? 2 : window.pageName === "playlist" ? 3 : window.pageName === "album" ? 4 : window.pageName === "artist" ? 5 : window.pageName === "lyric" ? 6 : window.pageName === "comments" ? 7 : window.pageName === "user" ? 8 : window.pageName === "downloads" ? 9 : 0
 
                 Flickable {
                     Layout.fillWidth: true
@@ -1115,11 +1302,54 @@ ApplicationWindow {
                 QtObject {
                     id: songMenuState
                     property int row: -1
+                    property var rows: []
                     function open(row) {
                         songMenuState.row = row
-                        removeTrackItem.visible = appBridge.canRemoveCurrent()
+                        if (songPick.rows.indexOf(row) < 0)
+                            songPick.rows = [row]
+                        songMenuState.rows = songPick.rows
+                        removeTrackItem.visible = appBridge.canRemoveCurrent() && songPick.rows.length < 2
                         appBridge.openCollect()
                         songMenu.popup()
+                    }
+                }
+                QtObject {
+                    id: songPick
+                    property var rows: []
+                    function toggle(row) {
+                        if (window.batchMode) {
+                            var modelRow = songList.get(row) || {}
+                            window.toggleSong(modelRow.songId)
+                            return
+                        }
+                        var next = rows.slice()
+                        var at = next.indexOf(row)
+                        if (at < 0)
+                            next.push(row)
+                        else
+                            next.splice(at, 1)
+                        rows = next
+                    }
+                    function has(row) {
+                        if (window.batchMode) {
+                            var modelRow = songList.get(row) || {}
+                            return window.rowSelected(modelRow.songId)
+                        }
+                        return rows.indexOf(row) >= 0
+                    }
+                    function clear() {
+                        rows = []
+                    }
+                    function packed() {
+                        if (window.batchMode)
+                            return window.selectionCode()
+                        var ids = []
+                        for (var i = 0; i < rows.length; i++) {
+                            var item = songList.get(rows[i]) || {}
+                            if (item.songId)
+                                ids.push(item.songId)
+                        }
+                        return ids.join(",")
                     }
                 }
                 Menu {
@@ -1134,9 +1364,12 @@ ApplicationWindow {
                         onTriggered: appBridge.toggleLike(songMenuState.row)
                     }
                     MenuItem {
-                        text: "↓  下载"
+                        text: songMenuState.rows.length > 1 ? ("↓  下载选中的 " + songMenuState.rows.length + " 首") : "↓  下载"
                         enabled: (songList.get(songMenuState.row) || {}).playable !== false
-                        onTriggered: appBridge.enqueueDownload(songMenuState.row)
+                        onTriggered: {
+                            appBridge.enqueueDownloads(songPick.packed())
+                            songPick.clear()
+                        }
                     }
                     MenuItem { text: "✎  查看评论"; onTriggered: appBridge.openComments(songMenuState.row) }
                     MenuItem {
@@ -1152,10 +1385,10 @@ ApplicationWindow {
                         Instantiator {
                             model: collectList
                             delegate: MenuItem {
-                                text: name
-                                visible: kind !== "create"
+                                text: model.name
+                                visible: model.kind !== "create"
                                 height: visible ? implicitHeight : 0
-                                onTriggered: appBridge.collectTo(songMenuState.row, itemId)
+                                onTriggered: appBridge.collectTo(songMenuState.row, model.itemId)
                             }
                             onObjectAdded: collectMenu.insertItem(index, object)
                             onObjectRemoved: collectMenu.removeItem(object)
@@ -1236,10 +1469,14 @@ ApplicationWindow {
                         width: songView.width
                         height: 56
                         opacity: model.playable === false ? 0.38 : 1
-                        onDoubleClicked: if (model.playable !== false) appBridge.playRow(index)
-                        onPressAndHold: songView.openRowMenu(index)
+                        onClicked: {
+                            if (window.batchMode)
+                                window.toggleSong(model.songId)
+                        }
+                        onDoubleClicked: if (!window.batchMode && model.playable !== false) appBridge.playRow(index)
+                        onPressAndHold: if (!window.batchMode) songView.openRowMenu(index)
                         background: Rectangle {
-                            color: model.songId === window.currentSongId ? "#FDECEC" : (parent.hovered && !songView.moving ? "#E8F3FF" : "transparent")
+                            color: songPick.has(index) ? "#E8F3FF" : (model.songId === window.currentSongId ? "#FDECEC" : (parent.hovered && !songView.moving ? "#F6F6F8" : "transparent"))
                         }
                         MouseArea {
                             anchors.fill: parent
@@ -1251,6 +1488,20 @@ ApplicationWindow {
                             anchors.leftMargin: 16
                             anchors.rightMargin: 16
                             spacing: 10
+                            Rectangle {
+                                width: window.batchMode ? 14 : 0
+                                height: 14
+                                visible: window.batchMode
+                                radius: 3
+                                border.color: window.rowSelected(model.songId) ? "#EC4141" : "#C8C8CC"
+                                color: window.rowSelected(model.songId) ? "#EC4141" : "transparent"
+                                MouseArea {
+                                    anchors.fill: parent
+                                    anchors.margins: -6
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: window.toggleSong(model.songId)
+                                }
+                            }
                             Label { text: index + 1; color: "#8E8E93"; Layout.preferredWidth: 28 }
                             Rectangle {
                                 width: 36
@@ -1272,6 +1523,7 @@ ApplicationWindow {
                                 Layout.fillWidth: true
                                 elide: Text.ElideRight
                             }
+                            Label { text: model.saved ? "已下载" : ""; color: "#3C9D5B"; font.pixelSize: 11; visible: text !== "" }
                             Label { text: model.vip ? "VIP" : ""; color: "#EC4141"; font.pixelSize: 11 }
                             Label {
                                 text: model.artist || ""
@@ -1322,20 +1574,10 @@ ApplicationWindow {
 
                 Component {
                     id: playlistPage
-                    ListView {
-                        id: playlistSongs
-                        Layout.fillWidth: true
-                        Layout.fillHeight: true
-                        clip: true
-                        boundsBehavior: Flickable.StopAtBounds
-                        ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
-                        cacheBuffer: 480
-                        header: Column {
-                            id: playlistColumn
-                            width: playlistSongs.width
-                            spacing: 8
-                            topPadding: 8
-                        Rectangle {
+                    ColumnLayout {
+                        id: playlistColumn
+                        spacing: 0
+                    Rectangle {
                             width: parent.width
                             height: playlistIntro.implicitHeight + 28
                             color: "#FFFFFF"
@@ -1442,53 +1684,104 @@ ApplicationWindow {
                                         }
                                     }
                                     Rectangle {
-                                        width: playNextLabel.implicitWidth + 28
+                                        id: playlistMoreButton
+                                        width: 32
                                         height: 32
                                         radius: 16
-                                        color: playNextHover.containsMouse ? "#FDECEC" : "#FFFFFF"
-                                        border.color: "#EC4141"
+                                        color: playlistMoreHover.containsMouse ? Theme.redSoft : Theme.card
+                                        border.color: Theme.line
                                         Label {
-                                            id: playNextLabel
                                             anchors.centerIn: parent
-                                            text: "下一首播放"
-                                            color: "#EC4141"
-                                            font.pixelSize: 13
+                                            text: "···"
+                                            color: Theme.ink
+                                            font.pixelSize: 16
+                                            font.bold: true
                                         }
                                         MouseArea {
-                                            id: playNextHover
+                                            id: playlistMoreHover
                                             anchors.fill: parent
                                             hoverEnabled: true
                                             cursorShape: Qt.PointingHandCursor
-                                            onClicked: appBridge.playListNext()
-                                        }
-                                    }
-                                    Rectangle {
-                                        visible: !window.playlistOwned && window.playlistSpecial !== 5
-                                        width: visible ? collectLabel.implicitWidth + 28 : 0
-                                        height: visible ? 32 : 0
-                                        radius: 16
-                                        color: collectHover.containsMouse ? (window.playlistCollected ? "#FDECEC" : "#F7F7F8") : "#FFFFFF"
-                                        border.color: window.playlistCollected ? "#EC4141" : "#D8D8DC"
-                                        Label {
-                                            id: collectLabel
-                                            anchors.centerIn: parent
-                                            text: window.playlistCollected ? "已收藏" : "收藏歌单"
-                                            color: window.playlistCollected ? "#EC4141" : "#333333"
-                                            font.pixelSize: 13
-                                        }
-                                        MouseArea {
-                                            id: collectHover
-                                            anchors.fill: parent
-                                            hoverEnabled: true
-                                            cursorShape: Qt.PointingHandCursor
-                                            onClicked: appBridge.toggleSubscribe()
+                                            onClicked: pageMoreMenu.popup(playlistMoreButton, 0, playlistMoreButton.height)
+                                            ToolTip.visible: containsMouse
+                                            ToolTip.text: "更多操作"
+                                            ToolTip.delay: 400
                                         }
                                     }
                                 }
                             }
                             }
                         }
-                        }
+                    Rectangle {
+                            visible: window.batchMode
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: visible ? 40 : 0
+                            color: "#F7F7F8"
+                            Button {
+                                anchors.right: parent.right
+                                anchors.rightMargin: 8
+                                anchors.verticalCenter: parent.verticalCenter
+                                text: "完成"
+                                flat: true
+                                onClicked: window.exitBatchMode()
+                            }
+                            Row {
+                                anchors.left: parent.left
+                                anchors.leftMargin: 16
+                                anchors.right: parent.right
+                                anchors.rightMargin: 88
+                                anchors.verticalCenter: parent.verticalCenter
+                                spacing: 8
+                                Item {
+                                    width: 16
+                                    height: 16
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    Rectangle {
+                                        anchors.fill: parent
+                                        radius: 3
+                                        border.width: 1
+                                        border.color: window.batchAll ? "#EC4141" : "#B8B8BE"
+                                        color: window.batchAll ? "#EC4141" : "transparent"
+                                    }
+                                    Label {
+                                        anchors.centerIn: parent
+                                        text: window.batchAll ? "✓" : window.selectedCount() > 0 ? "−" : ""
+                                        color: "white"
+                                        font.pixelSize: 12
+                                    }
+                                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: window.toggleSelectAll() }
+                                }
+                                Label {
+                                    text: window.selectedCount() + " / " + window.bridgeListCount + " 首"
+                                    color: "#333333"
+                                    font.pixelSize: 13
+                                    anchors.verticalCenter: parent.verticalCenter
+                                }
+                                IconButton { kind: "play"; tip: "播放选中"; enabled: window.selectedCount() > 0; onClicked: { appBridge.batchAction("play", window.selectionCode()); window.exitBatchMode() } }
+                                IconButton { kind: "plus"; tip: "加入播放列表"; enabled: window.selectedCount() > 0; onClicked: { appBridge.batchAction("queue", window.selectionCode()); window.exitBatchMode() } }
+                                IconButton {
+                                    kind: "heart"
+                                    tip: "收藏到歌单"
+                                    enabled: window.selectedCount() > 0
+                                    onClicked: {
+                                        collectPopup.batchMode = true
+                                        collectPopup.batchSelection = window.selectionCode()
+                                        appBridge.openCollect()
+                                        collectPopup.open()
+                                    }
+                                }
+                                IconButton { kind: "download"; tip: "下载选中"; enabled: window.selectedCount() > 0; onClicked: { appBridge.batchAction("download", window.selectionCode()); window.exitBatchMode() } }
+                                IconButton { kind: "close"; tip: "从歌单移除"; visible: window.playlistOwned; enabled: window.selectedCount() > 0; onClicked: batchRemoveDialog.open() }
+                            }
+                    }
+                    ListView {
+                        id: playlistSongs
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        clip: true
+                        boundsBehavior: Flickable.StopAtBounds
+                        ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+                        cacheBuffer: 480
                         model: window.songModel
                         onContentYChanged: {
                             if (contentHeight - contentY - height < 240)
@@ -1500,10 +1793,14 @@ ApplicationWindow {
                                 width: playlistSongs.width
                                 height: 56
                                 opacity: model.playable === false ? 0.38 : 1
-                                onDoubleClicked: if (model.playable !== false) appBridge.playRow(index)
-                                onPressAndHold: songMenuState.open(index)
+                                onClicked: {
+                                    if (window.batchMode)
+                                        window.toggleSong(model.songId)
+                                }
+                                onDoubleClicked: if (!window.batchMode && model.playable !== false) appBridge.playRow(index)
+                                onPressAndHold: if (!window.batchMode) songMenuState.open(index)
                                 background: Rectangle {
-                                    color: model.songId === window.currentSongId ? "#FDECEC" : (parent.hovered ? "#E8F3FF" : "transparent")
+                                    color: songPick.has(index) ? "#E8F3FF" : (model.songId === window.currentSongId ? "#FDECEC" : (parent.hovered ? "#F6F6F8" : "transparent"))
                                 }
                                 MouseArea {
                                     anchors.fill: parent
@@ -1515,6 +1812,20 @@ ApplicationWindow {
                                     anchors.leftMargin: 16
                                     anchors.rightMargin: 16
                                     spacing: 10
+                                    Rectangle {
+                                        width: window.batchMode ? 14 : 0
+                                        height: 14
+                                        visible: window.batchMode
+                                        radius: 3
+                                        border.color: window.rowSelected(model.songId) ? "#EC4141" : "#C8C8CC"
+                                        color: window.rowSelected(model.songId) ? "#EC4141" : "transparent"
+                                        MouseArea {
+                                            anchors.fill: parent
+                                            anchors.margins: -6
+                                            cursorShape: Qt.PointingHandCursor
+                                            onClicked: window.toggleSong(model.songId)
+                                        }
+                                    }
                                     Label { text: index + 1; color: "#8E8E93"; Layout.preferredWidth: 28 }
                                     Rectangle {
                                         width: 36
@@ -1536,6 +1847,7 @@ ApplicationWindow {
                                         Layout.fillWidth: true
                                         elide: Text.ElideRight
                                     }
+                                    Label { text: model.saved ? "已下载" : ""; color: "#3C9D5B"; font.pixelSize: 11; visible: text !== "" }
                                     Label {
                                         text: model.artist || ""
                                         color: model.artistId ? "#507DAF" : "#8E8E93"
@@ -1565,7 +1877,8 @@ ApplicationWindow {
                                     Label { text: clock(model.duration); color: "#8E8E93"; Layout.preferredWidth: 48 }
                                 }
                             }
-                        }
+                    }
+                    }
                 }
                 Loader {
                     active: window.pageName === "album"
@@ -1575,20 +1888,11 @@ ApplicationWindow {
                 }
                 Component {
                     id: albumPage
-                Flickable {
-                    id: albumFlick
-                    Layout.fillWidth: true
-                    Layout.fillHeight: true
-                    contentWidth: width
-                    contentHeight: albumColumn.implicitHeight + 24
-                    clip: true
-                    boundsBehavior: Flickable.StopAtBounds
-                    ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
-                    Column {
-                        id: albumColumn
-                        width: albumFlick.width
-                        spacing: 12
-                        topPadding: 8
+                ColumnLayout {
+                    id: albumColumn
+                    width: parent ? parent.width : 0
+                    height: parent ? parent.height : 0
+                    spacing: 0
                     Rectangle {
                         width: parent.width
                         height: albumIntro.implicitHeight + 28
@@ -1634,7 +1938,7 @@ ApplicationWindow {
                             }
                             Label {
                                 text: window.detailBrief
-                                color: "#666666"
+                                color: Theme.muted
                                 font.pixelSize: 12
                                 wrapMode: Text.Wrap
                                 width: parent.width
@@ -1642,18 +1946,121 @@ ApplicationWindow {
                                 elide: Text.ElideRight
                                 visible: text !== ""
                             }
+                            Row {
+                                spacing: 10
+                                topPadding: 6
+                                Rectangle {
+                                    id: albumMoreButton
+                                    width: 32
+                                    height: 32
+                                    radius: 16
+                                    color: albumMoreHover.containsMouse ? Theme.redSoft : Theme.card
+                                    border.color: Theme.line
+                                    Label {
+                                        anchors.centerIn: parent
+                                        text: "···"
+                                        color: Theme.ink
+                                        font.pixelSize: 16
+                                        font.bold: true
+                                    }
+                                    MouseArea {
+                                        id: albumMoreHover
+                                        anchors.fill: parent
+                                        hoverEnabled: true
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: pageMoreMenu.popup(albumMoreButton, 0, albumMoreButton.height)
+                                        ToolTip.visible: containsMouse
+                                        ToolTip.text: "更多操作"
+                                        ToolTip.delay: 400
+                                    }
+                                }
+                            }
                         }
                     }
                     }
-                    Repeater {
+                    ListView {
                         id: detailSongs
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        clip: true
+                        header: Rectangle {
+                            visible: window.batchMode
+                            width: detailSongs.width
+                            height: visible ? 40 : 0
+                            color: "#F7F7F8"
+                            Button {
+                                anchors.right: parent.right
+                                anchors.rightMargin: 8
+                                anchors.verticalCenter: parent.verticalCenter
+                                text: "完成"
+                                flat: true
+                                onClicked: window.exitBatchMode()
+                            }
+                            Row {
+                                anchors.left: parent.left
+                                anchors.leftMargin: 16
+                                anchors.right: parent.right
+                                anchors.rightMargin: 88
+                                anchors.verticalCenter: parent.verticalCenter
+                                spacing: 8
+                                Item {
+                                    width: 16
+                                    height: 16
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    Rectangle {
+                                        anchors.fill: parent
+                                        radius: 3
+                                        border.width: 1
+                                        border.color: window.batchAll ? "#EC4141" : "#B8B8BE"
+                                        color: window.batchAll ? "#EC4141" : "transparent"
+                                    }
+                                    Label {
+                                        anchors.centerIn: parent
+                                        text: window.batchAll ? "✓" : window.selectedCount() > 0 ? "−" : ""
+                                        color: "white"
+                                        font.pixelSize: 12
+                                    }
+                                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: window.toggleSelectAll() }
+                                }
+                                Label {
+                                    text: window.selectedCount() + " / " + window.bridgeListCount + " 首"
+                                    color: "#333333"
+                                    font.pixelSize: 13
+                                    anchors.verticalCenter: parent.verticalCenter
+                                }
+                                IconButton { kind: "play"; tip: "播放选中"; enabled: window.selectedCount() > 0; onClicked: { appBridge.batchAction("play", window.selectionCode()); window.exitBatchMode() } }
+                                IconButton { kind: "plus"; tip: "加入播放列表"; enabled: window.selectedCount() > 0; onClicked: { appBridge.batchAction("queue", window.selectionCode()); window.exitBatchMode() } }
+                                IconButton {
+                                    kind: "heart"
+                                    tip: "收藏到歌单"
+                                    enabled: window.selectedCount() > 0
+                                    onClicked: {
+                                        collectPopup.batchMode = true
+                                        collectPopup.batchSelection = window.selectionCode()
+                                        appBridge.openCollect()
+                                        collectPopup.open()
+                                    }
+                                }
+                                IconButton { kind: "download"; tip: "下载选中"; enabled: window.selectedCount() > 0; onClicked: { appBridge.batchAction("download", window.selectionCode()); window.exitBatchMode() } }
+                            }
+                        }
                         model: window.songModel
+                        boundsBehavior: Flickable.StopAtBounds
+                        cacheBuffer: 480
+                        ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
                         delegate: ItemDelegate {
                             width: albumColumn.width
                             height: 48
                             opacity: model.playable === false ? 0.38 : 1
-                            onDoubleClicked: if (model.playable !== false) appBridge.playRow(index)
-                            onPressAndHold: songMenuState.open(index)
+                            onClicked: {
+                                if (window.batchMode)
+                                    window.toggleSong(model.songId)
+                            }
+                            onDoubleClicked: if (!window.batchMode && model.playable !== false) appBridge.playRow(index)
+                            onPressAndHold: if (!window.batchMode) songMenuState.open(index)
+                            background: Rectangle {
+                                color: songPick.has(index) ? "#E8F3FF" : "transparent"
+                            }
                             MouseArea {
                                 anchors.fill: parent
                                 acceptedButtons: Qt.RightButton
@@ -1664,6 +2071,20 @@ ApplicationWindow {
                                 anchors.leftMargin: 16
                                 anchors.rightMargin: 16
                                 spacing: 10
+                                Rectangle {
+                                    width: window.batchMode ? 14 : 0
+                                    height: 14
+                                    visible: window.batchMode
+                                    radius: 3
+                                    border.color: window.rowSelected(model.songId) ? "#EC4141" : "#C8C8CC"
+                                    color: window.rowSelected(model.songId) ? "#EC4141" : "transparent"
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        anchors.margins: -6
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: window.toggleSong(model.songId)
+                                    }
+                                }
                                 Label { text: index + 1; color: "#8E8E93"; Layout.preferredWidth: 28 }
                                 Rectangle {
                                     width: 36
@@ -1680,6 +2101,7 @@ ApplicationWindow {
                                     }
                                 }
                                 Label { text: model.name || ""; Layout.fillWidth: true; elide: Text.ElideRight; color: "#333333" }
+                                Label { text: model.saved ? "已下载" : ""; color: "#3C9D5B"; font.pixelSize: 11; visible: text !== "" }
                                 Label {
                                     text: model.artist || ""
                                     color: model.artistId ? "#507DAF" : "#8E8E93"
@@ -1696,7 +2118,6 @@ ApplicationWindow {
                                 Label { text: clock(model.duration); color: "#8E8E93"; Layout.preferredWidth: 48 }
                             }
                         }
-                    }
                     }
                 }
                 }
@@ -1901,10 +2322,14 @@ ApplicationWindow {
                                         width: artistColumn.width
                                         height: 56
                                         opacity: model.playable === false ? 0.38 : 1
-                                        onDoubleClicked: if (model.playable !== false) appBridge.playRow(index)
-                                        onPressAndHold: songMenuState.open(index)
+                                        onClicked: {
+                                            if (window.batchMode)
+                                                window.toggleSong(model.songId)
+                                        }
+                                        onDoubleClicked: if (!window.batchMode && model.playable !== false) appBridge.playRow(index)
+                                        onPressAndHold: if (!window.batchMode) songMenuState.open(index)
                                         background: Rectangle {
-                                            color: model.songId === window.currentSongId ? "#FDECEC" : (parent.hovered ? "#E8F3FF" : "transparent")
+                                            color: songPick.has(index) ? "#E8F3FF" : (model.songId === window.currentSongId ? "#FDECEC" : (parent.hovered ? "#F6F6F8" : "transparent"))
                                         }
                                         MouseArea {
                                             anchors.fill: parent
@@ -1916,6 +2341,20 @@ ApplicationWindow {
                                             anchors.leftMargin: 16
                                             anchors.rightMargin: 16
                                             spacing: 10
+                                            Rectangle {
+                                                width: window.batchMode ? 14 : 0
+                                                height: 14
+                                                visible: window.batchMode
+                                                radius: 3
+                                                border.color: window.rowSelected(model.songId) ? "#EC4141" : "#C8C8CC"
+                                                color: window.rowSelected(model.songId) ? "#EC4141" : "transparent"
+                                                MouseArea {
+                                                    anchors.fill: parent
+                                                    anchors.margins: -6
+                                                    cursorShape: Qt.PointingHandCursor
+                                                    onClicked: window.toggleSong(model.songId)
+                                                }
+                                            }
                                             Label { text: index + 1; color: "#8E8E93"; Layout.preferredWidth: 28 }
                                             Rectangle {
                                                 width: 36
@@ -1937,6 +2376,7 @@ ApplicationWindow {
                                                 Layout.fillWidth: true
                                                 elide: Text.ElideRight
                                             }
+                                            Label { text: model.saved ? "已下载" : ""; color: "#3C9D5B"; font.pixelSize: 11; visible: text !== "" }
                                             Label {
                                                 text: model.artist || ""
                                                 color: model.artistId ? "#507DAF" : "#8E8E93"
@@ -2382,21 +2822,94 @@ ApplicationWindow {
                 }
 
                 ColumnLayout {
+                    id: downloadPage
                     Layout.fillWidth: true
                     Layout.fillHeight: true
                     spacing: 0
+                    property string downloadTab: "done"
+                    property bool downloadsPaused: false
+                    property int downloadRevision: 0
+                    Connections {
+                        target: window.downloadModel
+                        ignoreUnknownSignals: true
+                        onRowsChanged: downloadPage.downloadRevision += 1
+                    }
+
+                    function downloadCount(group) {
+                        if (!window.downloadModel)
+                            return 0
+                        var total = 0
+                        for (var i = 0; i < window.downloadModel.count; i++) {
+                            if (window.downloadModel.get(i).group === group)
+                                total += 1
+                        }
+                        return total
+                    }
+
                     RowLayout {
+                        id: downloadTabs
                         Layout.fillWidth: true
-                        Layout.leftMargin: 16
-                        Layout.rightMargin: 16
-                        Layout.topMargin: 8
-                        Layout.preferredHeight: 32
-                        Label {
-                            text: "文件保存在「音乐 / 网易云音乐」。这里只列出本机下载过的歌曲。"
-                            color: "#8E8E93"
-                            font.pixelSize: 12
-                            elide: Text.ElideRight
-                            Layout.fillWidth: true
+                        Layout.leftMargin: 8
+                        Layout.rightMargin: 8
+                        Layout.topMargin: 4
+                        Layout.preferredHeight: 40
+                        spacing: 4
+                        Button {
+                            text: "已下载 " + (downloadPage.downloadRevision, downloadPage.downloadCount("已下载"))
+                            flat: true
+                            font.bold: downloadPage.downloadTab === "done"
+                            onClicked: downloadPage.downloadTab = "done"
+                            background: Rectangle {
+                                color: downloadPage.downloadTab === "done" ? "#FFFFFF" : "transparent"
+                                radius: 6
+                            }
+                        }
+                        Button {
+                            text: "正在下载 " + (downloadPage.downloadRevision, downloadPage.downloadCount("正在下载"))
+                            flat: true
+                            font.bold: downloadPage.downloadTab === "active"
+                            onClicked: downloadPage.downloadTab = "active"
+                            background: Rectangle {
+                                color: downloadPage.downloadTab === "active" ? "#FFFFFF" : "transparent"
+                                radius: 6
+                            }
+                        }
+                        Button {
+                            text: "下载失败 " + (downloadPage.downloadRevision, downloadPage.downloadCount("下载失败"))
+                            flat: true
+                            font.bold: downloadPage.downloadTab === "failed"
+                            onClicked: downloadPage.downloadTab = "failed"
+                            background: Rectangle {
+                                color: downloadPage.downloadTab === "failed" ? "#FFFFFF" : "transparent"
+                                radius: 6
+                            }
+                        }
+                        Item { Layout.fillWidth: true }
+                        Button {
+                            visible: downloadPage.downloadTab === "active"
+                            text: downloadPage.downloadsPaused ? "继续下载" : "暂停下载"
+                            flat: true
+                            enabled: (downloadPage.downloadRevision, downloadPage.downloadCount("正在下载")) > 0 || downloadPage.downloadsPaused
+                            onClicked: {
+                                if (downloadPage.downloadsPaused) {
+                                    appBridge.resumeDownloads()
+                                    downloadPage.downloadsPaused = false
+                                } else {
+                                    appBridge.pauseDownloads()
+                                    downloadPage.downloadsPaused = true
+                                }
+                            }
+                        }
+                        Button {
+                            visible: downloadPage.downloadTab === "failed"
+                            text: "全部重新下载"
+                            flat: true
+                            enabled: (downloadPage.downloadRevision, downloadPage.downloadCount("下载失败")) > 0
+                            onClicked: {
+                                appBridge.retryFailedDownloads()
+                                downloadPage.downloadsPaused = false
+                                downloadPage.downloadTab = "active"
+                            }
                         }
                         Button {
                             text: "打开文件夹"
@@ -2406,8 +2919,8 @@ ApplicationWindow {
                     }
                     Label {
                         visible: downloadView.count === 0
-                        text: "还没有下载。在歌曲上右键选择「下载」，完成后会出现在这里。"
-                        color: "#8E8E93"
+                        text: parent.downloadTab === "done" ? "还没有已下载的歌曲。双击可以播放本地文件。" : parent.downloadTab === "active" ? "没有正在下载的歌曲。" : "没有下载失败的歌曲。"
+                        color: Theme.muted
                         font.pixelSize: 14
                         Layout.fillWidth: true
                         Layout.topMargin: 48
@@ -2419,43 +2932,74 @@ ApplicationWindow {
                         Layout.fillHeight: true
                         model: window.downloadModel
                         clip: true
-                        header: Item {
-                            width: downloadView.width
-                            height: 28
-                            visible: downloadView.count > 0
-                            RowLayout {
-                                anchors.fill: parent
-                                anchors.leftMargin: 16
-                                anchors.rightMargin: 16
-                                Label { text: "歌曲"; color: "#8E8E93"; font.pixelSize: 12; Layout.fillWidth: true }
-                                Label { text: "状态"; color: "#8E8E93"; font.pixelSize: 12; Layout.preferredWidth: 88 }
-                                Label { text: "音质"; color: "#8E8E93"; font.pixelSize: 12; Layout.preferredWidth: 120 }
-                                Label { text: "文件"; color: "#8E8E93"; font.pixelSize: 12; Layout.preferredWidth: 180 }
-                            }
-                        }
+
+                        property string tabGroup: parent.downloadTab === "active" ? "正在下载" : parent.downloadTab === "failed" ? "下载失败" : "已下载"
+
                         delegate: Item {
                             width: downloadView.width
-                            height: 40
+                            height: group === downloadView.tabGroup ? 44 : 0
+                            visible: height > 0
                             Rectangle {
                                 anchors.fill: parent
-                                color: index % 2 === 0 ? "transparent" : "#FAFAFB"
+                                color: downloadHover.containsMouse ? Theme.hover : (index % 2 === 0 ? "transparent" : Theme.page)
                             }
                             RowLayout {
                                 anchors.fill: parent
                                 anchors.leftMargin: 16
                                 anchors.rightMargin: 16
-                                Label { text: name; Layout.fillWidth: true; elide: Text.ElideRight; color: "#333333" }
                                 Label {
-                                    text: status
-                                    color: status === "完成" ? "#3C9D5B" : (String(status).indexOf("失败") === 0 ? "#EC4141" : "#8E8E93")
-                                    Layout.preferredWidth: 88
+                                    text: name
+                                    Layout.fillWidth: true
+                                    elide: Text.ElideRight
+                                    color: Theme.ink
+                                }
+                                Label {
+                                    text: status === "下载中" ? "正在下载" : status === "等待" ? "等待中" : status === "完成" ? quality : status
+                                    color: String(status).indexOf("失败") === 0 ? "#EC4141" : Theme.muted
+                                    Layout.preferredWidth: downloadView.tabGroup === "已下载" ? 88 : 220
                                     elide: Text.ElideRight
                                 }
-                                Label { text: quality; color: "#8E8E93"; Layout.preferredWidth: 120; elide: Text.ElideRight }
-                                Label { text: path; color: "#8E8E93"; Layout.preferredWidth: 180; elide: Text.ElideRight }
+                                Button {
+                                    visible: downloadView.tabGroup === "下载失败"
+                                    text: "重新下载"
+                                    flat: true
+                                    onClicked: {
+                                        appBridge.retryDownload(songId)
+                                        downloadPage.downloadsPaused = false
+                                        downloadPage.downloadTab = "active"
+                                    }
+                                }
+                            }
+                            MouseArea {
+                                id: downloadHover
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                acceptedButtons: Qt.LeftButton | Qt.RightButton
+                                enabled: downloadView.tabGroup === "已下载"
+                                cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                                onPressed: {
+                                    if (mouse.button === Qt.RightButton) {
+                                        downloadMenu.songId = songId
+                                        downloadMenu.popup()
+                                    }
+                                }
+                                onDoubleClicked: appBridge.playDownload(songId)
                             }
                         }
                     }
+                    Menu {
+                        id: downloadMenu
+                        property string songId: ""
+                        MenuItem {
+                            text: "下一首播放"
+                            onTriggered: appBridge.queueDownloadNext(downloadMenu.songId)
+                        }
+                        MenuItem {
+                            text: "播放"
+                            onTriggered: appBridge.playDownload(downloadMenu.songId)
+                        }
+                    }
+                }
                 }
             }
 
@@ -2713,10 +3257,10 @@ ApplicationWindow {
                     Instantiator {
                         model: collectList
                         delegate: MenuItem {
-                            text: name
-                            visible: kind !== "create"
+                            text: model.name
+                            visible: model.kind !== "create"
                             height: visible ? implicitHeight : 0
-                            onTriggered: appBridge.collectQueue(queueView.menuRow, itemId)
+                            onTriggered: appBridge.collectQueue(queueView.menuRow, model.itemId)
                         }
                         onObjectAdded: queueCollect.insertItem(index, object)
                         onObjectRemoved: queueCollect.removeItem(object)
@@ -2836,6 +3380,9 @@ ApplicationWindow {
         y: Math.max(8, parent.height - height - 72)
         padding: 16
         closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+                        property bool batchMode: false
+                        property string batchSelection: ""
+                        onClosed: batchMode = false
         Column {
             anchors.fill: parent
             spacing: 8
@@ -2893,9 +3440,17 @@ ApplicationWindow {
                     MouseArea {
                         anchors.fill: parent
                         onClicked: {
-                            if (kind === "create")
-                                createDialog.open()
-                            else {
+                            if (kind === "create") {
+                                var isBatch = collectPopup.batchMode
+                                collectPopup.close()
+                                if (isBatch)
+                                    batchCreateDialog.open()
+                                else
+                                    createDialog.open()
+                            } else if (collectPopup.batchMode) {
+                                appBridge.batchCollect(itemId, collectPopup.batchSelection)
+                                collectPopup.close()
+                            } else {
                                 appBridge.collectTo(-1, itemId)
                                 collectPopup.close()
                             }
@@ -2903,6 +3458,27 @@ ApplicationWindow {
                     }
                 }
             }
+        }
+    }
+
+    Dialog {
+        id: batchCreateDialog
+        title: "创建歌单并收藏"
+        modal: true
+        width: 280
+        standardButtons: Dialog.Ok | Dialog.Cancel
+        x: (parent.width - width) / 2
+        y: 80
+        TextField {
+            id: batchPlaylistName
+            width: parent.width
+            placeholderText: "歌单名称"
+            selectByMouse: true
+        }
+        onAccepted: {
+            appBridge.createPlaylistAndCollect(batchPlaylistName.text, collectPopup.batchSelection)
+            batchPlaylistName.text = ""
+            collectPopup.batchMode = false
         }
     }
 
