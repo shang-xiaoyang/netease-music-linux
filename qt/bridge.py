@@ -146,6 +146,7 @@ class AppBridge(QObject):
         self._download_lock = threading.Lock()
         self._download_paused = False
         self._download_wake = threading.Event()
+        self._download_cancel = set()
         self._supported = []
         self._list_token = 0
         self._list_id = ""
@@ -3297,13 +3298,26 @@ class AppBridge(QObject):
                 self._post("downloads", self._download_view())
                 continue
             self._post("downloads", self._download_view())
+            song_id = str(item.get("songId") or "")
             try:
-                path, level = self._download_one(item["song"], item.get("level") or self._quality)
+                path, level = self._download_one(item["song"], item.get("level") or self._quality, song_id)
             except Exception as exc:
+                if song_id in self._download_cancel or str(exc) == "已取消":
+                    self._download_cancel.discard(song_id)
+                    self._drop_download(item, remove_part=True)
+                    self._post("downloads", self._download_view())
+                    self._post("status", f"已取消：{item.get('name') or ''}")
+                    continue
                 LOG.info("download failed id=%s name=%s %s", item.get("songId"), item.get("name"), exc)
                 item["status"] = f"失败：{exc}"
                 self._save_downloads()
                 self._post("downloads", self._download_view())
+                continue
+            if song_id in self._download_cancel:
+                self._download_cancel.discard(song_id)
+                self._drop_download(item, remove_part=True)
+                self._post("downloads", self._download_view())
+                self._post("status", f"已取消：{item.get('name') or ''}")
                 continue
             item["status"] = "完成"
             item["path"] = path
@@ -3316,7 +3330,33 @@ class AppBridge(QObject):
             self._post("downloads", self._download_view())
             self._post("status", f"下载完成：{os.path.basename(path)}")
 
-    def _download_one(self, song, level):
+    def _download_part(self, song, ext):
+        music = os.path.join(os.path.expanduser("~/Music"), "网易云音乐")
+        raw = f"{song.get('artist') or '未知'} - {song.get('name') or song.get('songId') or ''}"
+        raw = raw.replace("/", " ").replace("\\", " ").replace("\x00", "").strip(" .") or str(song.get("songId") or "song")
+        return os.path.join(music, raw + "." + ext + ".part")
+
+    def _drop_download(self, item, remove_part):
+        """从队列拿掉这一首。取消时把没下完的半截也删掉。"""
+        song_id = str(item.get("songId") or "")
+        with self._download_lock:
+            self._download_rows = [
+                row for row in self._download_rows
+                if not (str(row.get("songId") or "") == song_id and row.get("status") in ("等待", "下载中"))
+            ]
+            self._save_downloads()
+        if not remove_part:
+            return
+        song = item.get("song") if isinstance(item.get("song"), dict) else {}
+        for ext in ("flac", "mp3", "ogg", "m4a", "wav", "aac"):
+            part = self._download_part(song or item, ext)
+            if os.path.isfile(part):
+                try:
+                    os.remove(part)
+                except OSError:
+                    pass
+
+    def _download_one(self, song, level, song_id=""):
         info = api.song_url(song["songId"], level=level, cookie=self._cookie)
         if not info or not allowed_uri(info.get("url")):
             raise api.ApiError("没有可下载地址")
@@ -3347,6 +3387,8 @@ class AppBridge(QObject):
                 written = have if resume else 0
                 with open(part, "ab" if resume else "wb") as handle:
                     while True:
+                        if song_id and song_id in self._download_cancel:
+                            raise OSError("已取消")
                         chunk = resp.read(65536)
                         if not chunk:
                             break
@@ -3544,7 +3586,127 @@ class AppBridge(QObject):
         index = next((i for i, row in enumerate(self._queue) if str(row.get("songId")) == str(song.get("songId"))), 0)
         if item.get("level"):
             self._quality = item["level"]
+        # 双击已下载是另开一首，不能接着上次那首歌的进度。
+        self._resume_at = 0
         self._play_index(index)
+
+    @pyqtSlot(str)
+    def deleteDownload(self, song_id):
+        """删掉已下载的本机文件，或清掉一条失败记录。只动下载目录里的文件。"""
+        song_id = str(song_id or "")
+        with self._download_lock:
+            failed = next((
+                row for row in self._download_rows
+                if str(row.get("songId") or "") == song_id and str(row.get("status") or "").startswith("失败")
+            ), None)
+            if failed is not None:
+                name = failed.get("name") or ""
+                self._download_rows = [
+                    row for row in self._download_rows
+                    if not (str(row.get("songId") or "") == song_id and str(row.get("status") or "").startswith("失败"))
+                ]
+                self._save_downloads()
+                self._post("downloads", self._download_view())
+                self._post("status", f"已删除：{name}")
+                return
+        found = self._completed_download(song_id)
+        if not found:
+            self.statusChanged.emit("本地文件不在了")
+            self._post("downloads", self._download_view())
+            return
+        _item, path = found
+        real = os.path.realpath(path)
+        if not self._in_music_folder(real):
+            self.statusChanged.emit("这个文件不在下载目录里")
+            return
+        try:
+            os.remove(real)
+        except OSError as exc:
+            self.statusChanged.emit(f"删除失败：{exc}")
+            return
+        with self._download_lock:
+            self._download_rows = [
+                row for row in self._download_rows
+                if os.path.realpath(row.get("path") or "") != real
+            ]
+            self._save_downloads()
+        self._mark_downloaded()
+        self._post("downloads", self._download_view())
+        self._post("status", f"已删除：{os.path.basename(real)}")
+
+    @pyqtSlot(str)
+    def deleteDownloads(self, encoded):
+        """批量删除已下载文件，或清掉下载失败的记录。编码是编号用逗号隔开。"""
+        keys = [item for item in str(encoded or "").split(",") if item]
+        if not keys:
+            self.statusChanged.emit("请先选择歌曲")
+            return
+        removed = 0
+        failed = 0
+        for key in keys:
+            found = self._completed_download(key)
+            if found:
+                _item, path = found
+                real = os.path.realpath(path)
+                if not self._in_music_folder(real):
+                    failed += 1
+                    continue
+                try:
+                    os.remove(real)
+                except OSError:
+                    failed += 1
+                    continue
+                with self._download_lock:
+                    self._download_rows = [
+                        row for row in self._download_rows
+                        if os.path.realpath(row.get("path") or "") != real
+                    ]
+                removed += 1
+                continue
+            with self._download_lock:
+                before = len(self._download_rows)
+                self._download_rows = [
+                    row for row in self._download_rows
+                    if not (str(row.get("songId") or "") == key and str(row.get("status") or "").startswith("失败"))
+                ]
+                if len(self._download_rows) < before:
+                    removed += 1
+        if removed:
+            with self._download_lock:
+                self._save_downloads()
+            self._mark_downloaded()
+        self._post("downloads", self._download_view())
+        if removed and not failed:
+            self._post("status", f"已删除 {removed} 首")
+        elif removed:
+            self._post("status", f"已删除 {removed} 首，{failed} 首失败")
+        else:
+            self.statusChanged.emit("没有删掉")
+
+    @pyqtSlot(str)
+    def cancelDownloads(self, encoded):
+        """批量取消正在下载和等待中的歌。"""
+        keys = [item for item in str(encoded or "").split(",") if item]
+        if not keys:
+            self.statusChanged.emit("请先选择歌曲")
+            return
+        cancelled = 0
+        for key in keys:
+            with self._download_lock:
+                item = next((
+                    row for row in self._download_rows
+                    if str(row.get("songId") or "") == key and row.get("status") in ("等待", "下载中")
+                ), None)
+            if item is None:
+                continue
+            if item.get("status") == "下载中":
+                self._download_cancel.add(key)
+            else:
+                self._drop_download(item, remove_part=True)
+            cancelled += 1
+        self._download_wake.set()
+        self._post("downloads", self._download_view())
+        self._post("status", f"已取消 {cancelled} 首" if cancelled else "这些歌不在下载队列里")
 
     @pyqtSlot(str)
     def queueDownloadNext(self, song_id):
@@ -3564,6 +3726,32 @@ class AppBridge(QObject):
         self._place_next(song)
         self.queue.replace(self._queue)
         self.statusChanged.emit(f"下一首播放 {song.get('name') or ''}")
+
+    @pyqtSlot(str)
+    def cancelDownload(self, song_id):
+        """取消正在下载或还在等待的一首。已完成的文件不从这里删。"""
+        song_id = str(song_id or "")
+        if not song_id:
+            return
+        with self._download_lock:
+            item = next((
+                row for row in self._download_rows
+                if str(row.get("songId") or "") == song_id and row.get("status") in ("等待", "下载中")
+            ), None)
+            if item is None:
+                self.statusChanged.emit("这首不在下载队列里")
+                return
+            name = item.get("name") or ""
+            if item.get("status") == "等待":
+                active = False
+            else:
+                self._download_cancel.add(song_id)
+                active = True
+        if not active:
+            self._drop_download(item, remove_part=True)
+        self._download_wake.set()
+        self._post("downloads", self._download_view())
+        self._post("status", "正在取消：" + name if active else "已取消：" + name)
 
     @pyqtSlot()
     def pauseDownloads(self):

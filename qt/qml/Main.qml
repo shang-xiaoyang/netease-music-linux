@@ -218,11 +218,14 @@ ApplicationWindow {
         window.duration = Number(parts[4] || 0)
         window.currentArtists = parts[5] || ""
         var previousId = window.currentSongId
-        var sameSong = parts[0] === previousId
-        window.currentSongId = parts[0] || ""
+        var previousTitle = window.songTitle
+        var nextId = parts[0] || ""
+        // 本地文件没有编号时，编号是空的。只比编号会把两首不同的歌当成同一首，进度就不归零。
+        var sameSong = nextId !== "" ? nextId === previousId : (parts[1] || "") === previousTitle && previousTitle !== ""
+        window.currentSongId = nextId
         // 打开时进度先到、歌曲后到。这时还没有上一首，不能把刚恢复的位置清成 0。
         // 播放中换成另一首才从开头显示，真正的进度随后由 bridgeClock 盖上。
-        if (!sameSong && previousId !== "") {
+        if (!sameSong && (previousId !== "" || previousTitle !== "")) {
             window.position = 0
             window.positionAnchor = 0
             window.positionAt = Date.now()
@@ -2833,11 +2836,13 @@ ApplicationWindow {
                     property string downloadTab: "done"
                     property bool downloadsPaused: false
                     property int downloadRevision: 0
+                    property var picked: ({})
                     Connections {
                         target: window.downloadModel
                         ignoreUnknownSignals: true
                         onRowsChanged: downloadPage.downloadRevision += 1
                     }
+                    onDownloadTabChanged: downloadPage.picked = ({})
 
                     function downloadCount(group) {
                         if (!window.downloadModel || !window.downloadModel.count)
@@ -2849,6 +2854,65 @@ ApplicationWindow {
                                 total += 1
                         }
                         return total
+                    }
+
+                    function rowIds(group) {
+                        var ids = []
+                        if (!window.downloadModel || !window.downloadModel.count)
+                            return ids
+                        var rows = window.downloadModel.count()
+                        for (var i = 0; i < rows; i++) {
+                            var row = window.downloadModel.get(i)
+                            if (row.group === group && row.songId)
+                                ids.push(row.songId)
+                        }
+                        return ids
+                    }
+
+                    function currentIds() {
+                        var group = downloadTab === "active" ? "正在下载" : downloadTab === "failed" ? "下载失败" : "已下载"
+                        return rowIds(group)
+                    }
+
+                    function pickedCount() {
+                        var total = 0
+                        var ids = currentIds()
+                        for (var i = 0; i < ids.length; i++) {
+                            if (picked[ids[i]])
+                                total += 1
+                        }
+                        return total
+                    }
+
+                    function togglePick(songId) {
+                        if (!songId)
+                            return
+                        var next = Object.assign({}, picked)
+                        if (next[songId])
+                            delete next[songId]
+                        else
+                            next[songId] = true
+                        picked = next
+                    }
+
+                    function togglePickAll() {
+                        var ids = currentIds()
+                        var next = {}
+                        if (pickedCount() !== ids.length) {
+                            for (var i = 0; i < ids.length; i++)
+                                next[ids[i]] = true
+                        }
+                        picked = next
+                    }
+
+                    function pickedCode() {
+                        var ids = currentIds()
+                        var chosen = []
+                        for (var i = 0; i < ids.length; i++) {
+                            if (picked[ids[i]])
+                                chosen.push(ids[i])
+                        }
+                        return chosen.join(",")
                     }
 
                     RowLayout {
@@ -2922,15 +2986,40 @@ ApplicationWindow {
                             }
                         }
                         Button {
+                            visible: downloadPage.downloadTab === "active"
+                            text: "取消所选"
+                            flat: true
+                            font.pixelSize: 13
+                            enabled: (downloadPage.downloadRevision, downloadPage.pickedCount()) > 0
+                            onClicked: {
+                                appBridge.cancelDownloads(downloadPage.pickedCode())
+                                downloadPage.picked = ({})
+                            }
+                        }
+                        Button {
                             visible: downloadPage.downloadTab === "failed"
-                            text: "全部重新下载"
+                            text: "重新下载"
                             flat: true
                             font.pixelSize: 13
                             enabled: (downloadPage.downloadRevision, downloadPage.downloadCount("下载失败")) > 0
                             onClicked: {
                                 appBridge.retryFailedDownloads()
                                 downloadPage.downloadsPaused = false
+                                downloadPage.picked = ({})
                                 downloadPage.downloadTab = "active"
+                            }
+                        }
+                        Button {
+                            visible: downloadPage.downloadTab === "failed" || downloadPage.downloadTab === "done"
+                            text: downloadPage.pickedCount() > 0 ? "删除所选" : "清空"
+                            flat: true
+                            font.pixelSize: 13
+                            enabled: (downloadPage.downloadRevision, downloadPage.downloadCount(downloadPage.downloadTab === "done" ? "已下载" : "下载失败")) > 0
+                            onClicked: {
+                                downloadAsk.bulk = true
+                                downloadAsk.songId = ""
+                                downloadAsk.songName = ""
+                                downloadAsk.open()
                             }
                         }
                         Button {
@@ -2938,6 +3027,34 @@ ApplicationWindow {
                             flat: true
                             font.pixelSize: 13
                             onClicked: appBridge.openDownloadFolder()
+                        }
+                    }
+                    RowLayout {
+                        visible: (downloadPage.downloadRevision, downloadPage.downloadCount(downloadPage.downloadTab === "active" ? "正在下载" : downloadPage.downloadTab === "failed" ? "下载失败" : "已下载")) > 0
+                        Layout.fillWidth: true
+                        Layout.leftMargin: 16
+                        Layout.rightMargin: 16
+                        Layout.preferredHeight: 32
+                        spacing: 8
+                        Rectangle {
+                            width: 14
+                            height: 14
+                            radius: 3
+                            border.width: 1
+                            border.color: downloadPage.pickedCount() > 0 ? "#EC4141" : "#C8C8CC"
+                            color: downloadPage.pickedCount() > 0 ? "#EC4141" : "transparent"
+                            Label {
+                                anchors.centerIn: parent
+                                text: downloadPage.pickedCount() > 0 && downloadPage.pickedCount() === downloadPage.currentIds().length ? "✓" : downloadPage.pickedCount() > 0 ? "−" : ""
+                                color: "white"
+                                font.pixelSize: 11
+                            }
+                            MouseArea { anchors.fill: parent; anchors.margins: -6; cursorShape: Qt.PointingHandCursor; onClicked: downloadPage.togglePickAll() }
+                        }
+                        Label {
+                            text: downloadPage.pickedCount() > 0 ? ("已选 " + downloadPage.pickedCount() + " 首") : "全选"
+                            color: "#333333"
+                            font.pixelSize: 12
                         }
                     }
                     Label {
@@ -2967,9 +3084,32 @@ ApplicationWindow {
                                 color: downloadHover.containsMouse ? Theme.hover : (index % 2 === 0 ? "transparent" : Theme.page)
                             }
                             RowLayout {
+                                id: downloadRow
+                                z: 1
                                 anchors.fill: parent
                                 anchors.leftMargin: 16
-                                anchors.rightMargin: 16
+                                anchors.rightMargin: 12
+                                spacing: 8
+                                Rectangle {
+                                    width: 14
+                                    height: 14
+                                    radius: 3
+                                    border.width: 1
+                                    border.color: downloadPage.picked[songId] ? "#EC4141" : "#C8C8CC"
+                                    color: downloadPage.picked[songId] ? "#EC4141" : "transparent"
+                                    Label {
+                                        anchors.centerIn: parent
+                                        text: downloadPage.picked[songId] ? "✓" : ""
+                                        color: "white"
+                                        font.pixelSize: 11
+                                    }
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        anchors.margins: -8
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: downloadPage.togglePick(songId)
+                                    }
+                                }
                                 Label {
                                     text: name
                                     Layout.fillWidth: true
@@ -2981,18 +3121,52 @@ ApplicationWindow {
                                     text: status === "下载中" ? "正在下载" : status === "等待" ? "等待中" : status === "完成" ? quality : status
                                     color: String(status).indexOf("失败") === 0 ? "#EC4141" : "#8E8E93"
                                     font.pixelSize: 12
-                                    Layout.preferredWidth: downloadView.tabGroup === "已下载" ? 72 : 180
+                                    Layout.preferredWidth: downloadView.tabGroup === "已下载" ? 72 : 120
                                     elide: Text.ElideRight
                                 }
-                                Button {
-                                    visible: downloadView.tabGroup === "下载失败"
-                                    text: "重新下载"
-                                    flat: true
+                                Label {
+                                    visible: downloadView.tabGroup === "正在下载" && downloadHover.containsMouse
+                                    text: "取消"
+                                    color: "#EC4141"
                                     font.pixelSize: 12
-                                    onClicked: {
-                                        appBridge.retryDownload(songId)
-                                        downloadPage.downloadsPaused = false
-                                        downloadPage.downloadTab = "active"
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        anchors.margins: -6
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: appBridge.cancelDownload(songId)
+                                    }
+                                }
+                                Label {
+                                    visible: downloadView.tabGroup === "下载失败" && downloadHover.containsMouse
+                                    text: "重新下载"
+                                    color: "#333333"
+                                    font.pixelSize: 12
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        anchors.margins: -6
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: {
+                                            appBridge.retryDownload(songId)
+                                            downloadPage.downloadsPaused = false
+                                            downloadPage.downloadTab = "active"
+                                        }
+                                    }
+                                }
+                                Label {
+                                    visible: (downloadView.tabGroup === "已下载" || downloadView.tabGroup === "下载失败") && downloadHover.containsMouse
+                                    text: "删除"
+                                    color: "#EC4141"
+                                    font.pixelSize: 12
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        anchors.margins: -6
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: {
+                                            downloadAsk.bulk = false
+                                            downloadAsk.songId = songId
+                                            downloadAsk.songName = name
+                                            downloadAsk.open()
+                                        }
                                     }
                                 }
                             }
@@ -3001,21 +3175,28 @@ ApplicationWindow {
                                 anchors.fill: parent
                                 hoverEnabled: true
                                 acceptedButtons: Qt.LeftButton | Qt.RightButton
-                                enabled: downloadView.tabGroup === "已下载"
-                                cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                                cursorShape: downloadView.tabGroup === "已下载" ? Qt.PointingHandCursor : Qt.ArrowCursor
+                                propagateComposedEvents: true
                                 onPressed: {
-                                    if (mouse.button === Qt.RightButton) {
+                                    if (mouse.button === Qt.RightButton && downloadView.tabGroup === "已下载") {
                                         downloadMenu.songId = songId
+                                        downloadMenu.songName = name
                                         downloadMenu.popup()
+                                    } else {
+                                        mouse.accepted = false
                                     }
                                 }
-                                onDoubleClicked: appBridge.playDownload(songId)
+                                onDoubleClicked: {
+                                    if (downloadView.tabGroup === "已下载")
+                                        appBridge.playDownload(songId)
+                                }
                             }
                         }
                     }
                     Menu {
                         id: downloadMenu
                         property string songId: ""
+                        property string songName: ""
                         MenuItem {
                             text: "下一首播放"
                             onTriggered: appBridge.queueDownloadNext(downloadMenu.songId)
@@ -3023,6 +3204,104 @@ ApplicationWindow {
                         MenuItem {
                             text: "播放"
                             onTriggered: appBridge.playDownload(downloadMenu.songId)
+                        }
+                        MenuItem {
+                            text: "删除"
+                            onTriggered: {
+                                downloadAsk.bulk = false
+                                downloadAsk.songId = downloadMenu.songId
+                                downloadAsk.songName = downloadMenu.songName
+                                downloadAsk.open()
+                            }
+                        }
+                    }
+                    Popup {
+                        id: downloadAsk
+                        parent: window.contentItem
+                        property bool bulk: false
+                        property string songId: ""
+                        property string songName: ""
+                        modal: true
+                        focus: true
+                        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+                        width: 320
+                        height: 148
+                        x: Math.round((parent.width - width) / 2)
+                        y: Math.round((parent.height - height) / 2 - 40)
+                        padding: 0
+                        background: Rectangle { color: "#FFFFFF"; radius: 10; border.color: "#E6E6EA" }
+                        Column {
+                            anchors.fill: parent
+                            spacing: 0
+                            Item {
+                                width: parent.width
+                                height: parent.height - 45
+                                Label {
+                                    anchors.left: parent.left
+                                    anchors.right: parent.right
+                                    anchors.top: parent.top
+                                    anchors.leftMargin: 20
+                                    anchors.rightMargin: 20
+                                    anchors.topMargin: 18
+                                    text: downloadAsk.bulk
+                                          ? (downloadPage.downloadTab === "done" ? "删除已下载的歌曲" : "删除失败记录")
+                                          : (downloadPage.downloadTab === "failed" ? "删除这条失败记录" : "删除本地文件")
+                                    color: "#222222"
+                                    font.pixelSize: 15
+                                    font.bold: true
+                                }
+                                Label {
+                                    anchors.left: parent.left
+                                    anchors.right: parent.right
+                                    anchors.bottom: parent.bottom
+                                    anchors.leftMargin: 20
+                                    anchors.rightMargin: 20
+                                    anchors.bottomMargin: 14
+                                    wrapMode: Text.Wrap
+                                    text: downloadAsk.bulk
+                                          ? (downloadPage.pickedCount() > 0
+                                             ? ("确定删除已选择的 " + downloadPage.pickedCount() + " 首吗？")
+                                             : (downloadPage.downloadTab === "done" ? "确定清空已下载列表，并删除对应的本地文件吗？" : "确定清空全部失败记录吗？"))
+                                          : ("确定删除「" + (downloadAsk.songName || "这首") + "」吗？" + (downloadPage.downloadTab === "failed" ? "" : "网易云上的歌曲不会受影响。"))
+                                    color: "#666666"
+                                    font.pixelSize: 13
+                                }
+                            }
+                            Rectangle { width: parent.width; height: 1; color: "#EFEFF2" }
+                            Row {
+                                width: parent.width
+                                height: 44
+                                Rectangle {
+                                    width: parent.width / 2
+                                    height: parent.height
+                                    color: askCancel.containsMouse ? "#F7F7F8" : "transparent"
+                                    Label { anchors.centerIn: parent; text: "取消"; color: "#333333"; font.pixelSize: 14 }
+                                    MouseArea { id: askCancel; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: downloadAsk.close() }
+                                }
+                                Rectangle { width: 1; height: parent.height; color: "#EFEFF2" }
+                                Rectangle {
+                                    width: parent.width / 2 - 1
+                                    height: parent.height
+                                    color: askOk.containsMouse ? "#FDECEC" : "transparent"
+                                    Label { anchors.centerIn: parent; text: "删除"; color: "#EC4141"; font.pixelSize: 14 }
+                                    MouseArea {
+                                        id: askOk
+                                        anchors.fill: parent
+                                        hoverEnabled: true
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: {
+                                            if (downloadAsk.bulk) {
+                                                var code = downloadPage.pickedCount() > 0 ? downloadPage.pickedCode() : downloadPage.currentIds().join(",")
+                                                appBridge.deleteDownloads(code)
+                                                downloadPage.picked = ({})
+                                            } else {
+                                                appBridge.deleteDownload(downloadAsk.songId)
+                                            }
+                                            downloadAsk.close()
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
